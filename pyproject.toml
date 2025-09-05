@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocrack"
+version = "1.0.0"
+description = "OCRack - Advanced PDF Translation and OCR tool with structure preservation"
+authors = [{name = "Marcos Tolosa", email = "marcos.tolosa@owasp.org"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["pdf", "translation", "openai", "portuguese", "markdown"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+dependencies = [
+    "pdfplumber>=0.7.0",
+    "PyPDF2>=3.0.0",
+    "PyMuPDF>=1.23.0",
+    "openai>=1.0.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "platformdirs>=3.0.0",
+    "pytesseract>=0.3.10",
+    "Pillow>=9.0.0",
+    "opencv-python>=4.8.0",
+    "paddlepaddle>=2.6.0",
+    "paddleocr>=2.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "flake8>=6.0",
+]
+
+[project.scripts]
+ocrack = "pdf_translate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ocrack/ocrack"
+Documentation = "https://github.com/ocrack/ocrack/blob/main/README.md"
+Repository = "https://github.com/ocrack/ocrack"
+Issues = "https://github.com/ocrack/ocrack/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pdf_translate*"]
+exclude = ["tests*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
