@@ -16,7 +16,7 @@ from .assemble import (
     write_chapter_file, assemble_full_document, generate_pdf, 
     check_pandoc_available, print_pdf_requirements, add_metadata_to_markdown
 )
-from .images import extract_image_manifest, reinsert_images, validate_manifest, print_manifest_info
+from .images import extract_image_manifest
 from .simple_ui import SimpleUI, print_info, print_warning, print_error, print_success, simulate_dry_run_progress
 from .logger import setup_logger, cleanup_logger
 from .pricing import get_model_pricing
@@ -29,22 +29,20 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Dry run with Rich UI to see what would be translated
-  ocrack input.pdf --dry-run --log-level INFO
+  # Basic usage (extracts images & generates PDF by default)
+  ocrack input.pdf --pages "234-235"
   
-  # Translate specific chapters with Rich UI status
-  ocrack input.pdf -c "1,3-5" -o output/ --log-level DEBUG
+  # Translate chapters with images and PDF (default behavior)
+  ocrack input.pdf -c "1,3-5" -o output/
   
-  # Translate page range with PDF output
-  ocrack input.pdf --pages "10-28" -p -o output/
+  # Show translation in terminal with Rich formatting
+  ocrack input.pdf --pages "10-28" --cli
   
-  # Complete workflow with images and Rich UI
-  ocrack input.pdf --images manifest -o output/
-  ocrack input.pdf -c "1-5" -p -o output/
-  ocrack output/LIVRO_TRADUZIDO.pdf --images reinserir
+  # Translate without image extraction 
+  ocrack input.pdf --pages "10-28" --no-ocr
   
   # High-quality translation with cost optimization
-  ocrack input.pdf -m gpt-4o -c "1-10" --resume -p --max-chars 15000
+  ocrack input.pdf -m gpt-4o -c "1-10" --resume --max-chars 15000
 
 Environment variables:
   OPENAI_API_KEY     OpenAI API key (required)
@@ -82,7 +80,7 @@ Rich UI Features:
     )
     
     parser.add_argument(
-        "--pages",
+        "-p", "--pages",
         help="Page range to translate (e.g., '10-28') - overrides chapter selection"
     )
     
@@ -94,9 +92,9 @@ Rich UI Features:
     )
     
     parser.add_argument(
-        "-p", "--pdf",
+        "--cli",
         action="store_true",
-        help="Generate PDF output using pandoc"
+        help="Show markdown output in terminal with Rich instead of generating PDF"
     )
     
     # Chunking options
@@ -140,11 +138,11 @@ Rich UI Features:
         help="Use layout-aware text extraction (default: enabled)"
     )
     
-    # Image options
+    # Image options (OCR is enabled by default)
     parser.add_argument(
-        "--images",
-        choices=["manifest", "reinserir"],
-        help="Image handling: 'manifest' to extract, 'reinserir' to reinsert"
+        "--no-ocr",
+        action="store_true",
+        help="Disable image extraction and reinsertion (OCR is enabled by default)"
     )
     
     parser.add_argument(
@@ -162,11 +160,6 @@ Rich UI Features:
         help="Use OCR for scanned/image-based PDFs (default: enabled)"
     )
     
-    parser.add_argument(
-        "--no-ocr",
-        action="store_true",
-        help="Disable OCR - only use standard text extraction"
-    )
     
     parser.add_argument(
         "--ocr-lang",
@@ -222,8 +215,8 @@ def validate_arguments(args) -> bool:
         print_error(str(e))
         return False
     
-    # Check API key unless dry run or images only
-    if not args.dry_run and not args.images:
+    # Check API key unless dry run 
+    if not args.dry_run:
         if not validate_api_key():
             print_error(
                 "OpenAI API key is required. Set the OPENAI_API_KEY environment variable.\n"
@@ -231,11 +224,12 @@ def validate_arguments(args) -> bool:
             )
             return False
     
-    # Check pandoc if PDF output requested
-    if args.pdf and not check_pandoc_available():
+    # Check pandoc if PDF output requested (PDF is default unless --cli flag)
+    if not args.cli and not check_pandoc_available():
         print_error(
             "pandoc is required for PDF generation.\n"
-            "Install from: https://pandoc.org/installing.html"
+            "Install from: https://pandoc.org/installing.html\n"
+            "Use --cli flag to show output in terminal instead."
         )
         return False
     
@@ -250,66 +244,6 @@ def validate_arguments(args) -> bool:
     
     return True
 
-
-def handle_image_operations(args, ui_status=None) -> int:
-    """Handle image extraction or reinsertion operations."""
-    pdf_path = Path(args.input_pdf)
-    output_dir = ensure_output_dir(args.output)
-    
-    if args.images == "manifest":
-        if ui_status:
-            ui_status.set_phase("Extraindo manifesto de imagens")
-        
-        print_info("Extracting image manifest...")
-        try:
-            manifest = extract_image_manifest(pdf_path, output_dir)
-            
-            if ui_status:
-                ui_status.finish_phase("Extraindo manifesto de imagens", success=True)
-            
-            print_success(f"Extracted {manifest['total_images']} images")
-            return 0
-        except Exception as e:
-            if ui_status:
-                ui_status.finish_phase("Extraindo manifesto de imagens", success=False)
-            
-            print_error(f"Image extraction failed: {e}")
-            return 1
-    
-    elif args.images == "reinserir":
-        manifest_path = output_dir / "img_manifest" / "manifest.json"
-        
-        if not manifest_path.exists():
-            print_error(f"Image manifest not found: {manifest_path}")
-            print_info("Run with --images manifest first to extract images")
-            return 1
-        
-        if not validate_manifest(manifest_path):
-            print_error("Invalid image manifest")
-            return 1
-        
-        print_manifest_info(manifest_path)
-        
-        if ui_status:
-            ui_status.set_phase("Reinserindo imagens no PDF")
-        
-        print_info("Reinserting images...")
-        try:
-            output_pdf = reinsert_images(pdf_path, manifest_path, args.page_shift)
-            
-            if ui_status:
-                ui_status.finish_phase("Reinserindo imagens no PDF", success=True)
-            
-            print_success(f"Images reinserted: {output_pdf}")
-            return 0
-        except Exception as e:
-            if ui_status:
-                ui_status.finish_phase("Reinserindo imagens no PDF", success=False)
-            
-            print_error(f"Image reinsertion failed: {e}")
-            return 1
-    
-    return 1
 
 
 def simulate_dry_run_progress(ui_status, total_chunks: int, total_pages: int):
@@ -364,13 +298,9 @@ def main():
     model_name = args.model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
     # Create UI status system
-    enable_ui = not args.no_ui and not args.images
     ui_status = SimpleUI()  # Use simple UI instead of Rich UI
     
     try:
-        # Handle image operations
-        if args.images:
-            return handle_image_operations(args, ui_status)
         
         # Check if PDF is extractable
         if not validate_pdf_extractable(pdf_path):
@@ -437,6 +367,18 @@ def main():
         if chapters:
             title, start, end = chapters[0]
             ui_status.set_chapter(0, len(chapters), title, start, end)
+        
+        # Extract images by default (unless --no-ocr flag is used)
+        if not args.no_ocr:
+            ui_status.set_phase("Extraindo manifesto de imagens")
+            print_info("Extracting image manifest for reinsertion...")
+            try:
+                manifest = extract_image_manifest(pdf_path, output_dir, target_pages)
+                ui_status.finish_phase("Extraindo manifesto de imagens", success=True)
+                print_success(f"Extracted {manifest['total_images']} images")
+            except Exception as e:
+                ui_status.finish_phase("Extraindo manifesto de imagens", success=False)
+                print_warning(f"Image extraction failed: {e}. Continuing without images...")
         
         # Extract text from target pages
         ui_status.set_phase("Extraindo texto do PDF")
@@ -611,8 +553,22 @@ def main():
         ui_status.finish_phase("Montando documento traduzido", success=True)
         print_success(f"Translation completed: {markdown_path}")
         
-        # Generate PDF if requested
-        if args.pdf:
+        # Show output in terminal if --cli flag is used
+        if args.cli:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            
+            print_info("Displaying translated content in terminal...")
+            
+            with open(markdown_path, 'r', encoding='utf-8') as f:
+                markdown_content = f.read()
+                
+            rich_console = Console()
+            md = Markdown(markdown_content)
+            rich_console.print(md)
+            
+        else:
+            # Generate PDF by default (unless --cli flag is used)
             ui_status.set_phase("Gerando PDF via pandoc")
             print_info("Generating PDF...")
             try:
@@ -624,7 +580,12 @@ def main():
                     subject=metadata.get('subject', '')
                 )
                 
-                pdf_path = generate_pdf(markdown_path)
+                # Check for extracted images directory
+                images_dir = output_dir / "img_manifest"
+                if not images_dir.exists():
+                    images_dir = None
+                
+                pdf_path = generate_pdf(markdown_path, images_dir=images_dir)
                 ui_status.finish_phase("Gerando PDF via pandoc", success=True)
                 print_success(f"PDF generated: {pdf_path}")
                 

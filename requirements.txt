@@ -1,0 +1,29 @@
+# OCRack - Advanced PDF Translation Engine
+# Core dependencies
+
+# PDF Processing
+pdfplumber>=0.7.0
+PyPDF2>=3.0.0
+PyMuPDF>=1.23.0
+
+# OpenAI API
+openai>=1.0.0
+
+# Terminal UI
+rich>=13.0.0
+
+# Configuration and utilities
+pyyaml>=6.0
+platformdirs>=3.0.0
+
+# OCR Engines (PaddleOCR primary, Tesseract fallback)
+pytesseract>=0.3.10
+paddlepaddle>=2.6.0
+paddleocr>=2.8.0
+
+# Image Processing
+Pillow>=9.0.0
+opencv-python>=4.8.0
+
+# PDF Generation
+markdown-pdf>=0.1.0

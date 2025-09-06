@@ -1,200 +1,140 @@
-# OCRack
+# OCRack - Advanced PDF Translation Engine
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](https://python.org)
-[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-green?logo=openai&logoColor=white)](https://openai.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o--mini-green.svg)](https://openai.com/)
+[![Rich UI](https://img.shields.io/badge/UI-Rich%20Terminal-purple.svg)](https://github.com/Textualize/rich)
+[![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Advanced PDF translation tool with superior OCR capabilities and intelligent document processing.
+Professional-grade PDF translation system with OCR capabilities, intelligent chunking, and automated image extraction/reinsertion.
+
+![](assets/demo.png)
 
 ## Features
 
-- **OCR Engine**: PaddleOCR v3.2.0 for maximum text extraction accuracy
-- **Translation**: GPT-4/4o-mini with optimized prompts for technical content
-- **Chapter Detection**: Automatic extraction via PDF bookmarks or heuristic patterns
-- **Smart Chunking**: Optimized block sizing for better context and cost efficiency
-- **Checkpoint System**: Resume functionality for large documents
-- **Image Support**: Extract and reinsert images at original positions
-- **Output Formats**: PDF/HTML generation via Pandoc with LaTeX fallback
-- **Cost Optimization**: Automatic prompt caching (50% discount) and token control
-- **Resilience**: Exponential backoff retry, rate limiting, intelligent ETA
-- **Telemetry**: Comprehensive logging and performance metrics
+- **Default Behavior**: Automatic image extraction + translation + PDF generation
+- **Smart Chunking**: Intelligent text segmentation for optimal translation context
+- **Image Processing**: Automatic extraction and reinsertion with precise positioning
+- **Cost Optimization**: Real-time cost tracking with OpenAI API caching support
+- **Rich UI**: Professional terminal interface with detailed progress tracking
+- **Robust Pipeline**: Error handling, retries, and checkpoint recovery
 
-## Interface
+## Quick Start
 
-Real-time status display with progress tracking:
-- PDF name, LLM model, processing timestamps
-- Chapter/page progress with completion percentages  
-- Chunk progress bars with ETA and processing speed
-- Token usage and cost estimation with caching savings
-- Current operation status and error handling
-- Checkpoint/resume state for interrupted sessions
-
-## Installation
-
+### Installation
 ```bash
-git clone https://github.com/ocrack/ocrack.git
-cd ocrack
+git clone https://github.com/marcostolosa/OCRack.git
+cd OCRack
 pip install -e .
 ```
 
-Verify installation:
+#### Dependencies
 ```bash
-ocrack --version
+# Core dependencies (installed automatically)
+pip install -r requirements.txt
+
+# External programs (install separately)
+# - Pandoc: https://pandoc.org/installing.html
+# - Tesseract OCR: https://github.com/tesseract-ocr/tesseract
 ```
 
-### API Configuration
-
+### Basic Usage
 ```bash
-export OPENAI_API_KEY='your-key-here'
+# Default: Extract images + translate + generate PDF
+ocrack document.pdf -p "234-235"
+
+# Skip image extraction
+ocrack document.pdf -p "234-235" --no-ocr
+
+# Terminal output only (no PDF)
+ocrack document.pdf -p "234-235" --cli
 ```
 
-### PDF Generation (Optional)
+## Command Reference
 
-For PDF output, install Pandoc and LaTeX:
-
-**Ubuntu/Debian:**
+### Core Commands
 ```bash
-sudo apt install pandoc texlive-xetex
+# Page range translation
+ocrack input.pdf --pages "10-28"
+
+# Chapter-based translation  
+ocrack input.pdf -c "1,3-5"
+
+# High-quality model
+ocrack input.pdf --pages "10-28" -m gpt-4o
+
+# Cost control
+ocrack input.pdf -c "1-10" --max-chunks 50
 ```
 
-**macOS:**
-```bash
-brew install pandoc mactex
-```
+### Flags
+| Flag | Description |
+|------|-------------|
+| `--pages "X-Y"` | Translate specific page range |
+| `--no-ocr` | Disable image extraction |
+| `--cli` | Terminal output (skip PDF generation) |
+| `-c "1,3-5"` | Translate specific chapters |
+| `-m MODEL` | OpenAI model (default: gpt-4o-mini) |
+| `-o DIR` | Output directory |
 
-**Windows:**
-```bash
-choco install pandoc miktex
-```
+## Architecture
 
-## Usage
-
-### Basic Translation
-
-```bash
-# Translate entire document
-ocrack document.pdf -o output/
-
-# Specific chapters
-ocrack book.pdf -c "1,3-5" -o output/
-
-# Page range
-ocrack paper.pdf --pages "10-25" -o output/
-```
-
-### OCR and Advanced Options
-
-```bash
-# Force OCR on all pages
-ocrack scanned_doc.pdf --force-ocr -o output/
-
-# With PDF output
-ocrack document.pdf -c "1-5" -p -o output/
-
-# Custom model and chunking
-ocrack large_doc.pdf -m gpt-4o --max-chars 8000 --resume -o output/
-```
-
-### Image Workflow
-
-```bash
-# Extract images
-ocrack illustrated_book.pdf --images manifest -o output/
-
-# Translate with images
-ocrack illustrated_book.pdf -c "1-3" -p -o output/
-
-# Reinsert images
-ocrack output/LIVRO_TRADUZIDO.pdf --images reinserir
-```
-
-### Development and Testing
-
-```bash
-# Dry run (no API calls)
-ocrack document.pdf --dry-run
-
-# Limited chunks for testing
-ocrack test.pdf --max-chunks 3 -o test_output/
-
-# Debug logging
-ocrack document.pdf --log-level DEBUG
-```
-
-## Command Line Options
-
-```
-usage: ocrack [-h] [-m MODEL] [-c CHAPTERS] [--pages PAGES] [-o OUTPUT] [-p]
-              [--max-chars MAX_CHARS] [--merge-threshold MERGE_THRESHOLD]
-              [--dry-run] [--resume] [--max-chunks MAX_CHUNKS]
-              [--layout-aware] [--images {manifest,reinserir}]
-              [--page-shift PAGE_SHIFT] [--use-ocr] [--no-ocr]
-              [--ocr-lang OCR_LANG] [--force-ocr]
-              [--log-level {DEBUG,INFO,WARN,ERROR}] [--no-ui]
-              [--log-dir LOG_DIR] [--version]
-              input_pdf
-
-Options:
-  -m MODEL              Model: gpt-4o, gpt-4o-mini (default)
-  -c CHAPTERS           Chapters: "1,3-5,8"
-  --pages PAGES         Page range: "10-25" (overrides chapter detection)
-  -o OUTPUT             Output directory (default: out/)
-  -p, --pdf             Generate PDF output via Pandoc
-  --max-chars N         Max characters per chunk (default: 12000)
-  --merge-threshold N   Merge small chunks threshold (default: 1200)
-  --dry-run             Show translation plan without API calls
-  --resume              Resume from checkpoint file
-  --max-chunks N        Limit chunks for testing
-  --layout-aware        Use layout-aware text extraction (default: enabled)
-  --images ACTION       Extract images (manifest) or reinsert (reinserir)
-  --page-shift N        Page offset for image reinsertion (default: 0)
-  --use-ocr             Use OCR for scanned PDFs (default: enabled)
-  --no-ocr              Disable OCR - only standard text extraction
-  --ocr-lang LANG       OCR language: 'eng', 'por', 'eng+por' (default: eng+por)
-  --force-ocr           Force OCR on all pages (higher accuracy)
-  --log-level LEVEL     Logging: DEBUG, INFO, WARN, ERROR (default: INFO)
-  --no-ui              Disable Rich UI (machine-readable output)
-  --log-dir DIR         Custom log directory (default: logs/)
-```
+### Pipeline
+1. **PDF Analysis** - Document structure and metadata extraction
+2. **Image Extraction** - Page-specific image harvesting with coordinates
+3. **Text Extraction** - Layout-aware text processing with OCR fallback
+4. **Smart Chunking** - Context-preserving text segmentation
+5. **AI Translation** - OpenAI GPT-powered EN→PT-BR translation
+6. **Document Assembly** - Markdown compilation with metadata
+7. **PDF Generation** - Python-based PDF creation with image reinsertion
 
 ## Configuration
 
-Environment variables:
-- `OPENAI_API_KEY`: Required API key
-- `OPENAI_MODEL`: Default model (default: gpt-4o-mini)
-- `OPENAI_BASE_URL`: Custom API endpoint (optional)
-
-## Output Structure
-
+### Environment Variables
+```bash
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-4o-mini"  # optional
+export OPENAI_BASE_URL="..."       # optional
 ```
-output/
-├── LIVRO_TRADUZIDO.md          # Translated markdown
-├── LIVRO_TRADUZIDO.html        # HTML fallback
-├── LIVRO_TRADUZIDO.pdf         # PDF output (if -p flag)
-├── img_manifest/               # Extracted images
-│   ├── manifest.json          # Image metadata
-│   └── page_*.png            # Image files
-├── checkpoint.json            # Resume data
-└── logs/                     # Session logs
+
+### File Structure
+```
+project/
+├── out/                       # Default output directory
+│   ├── LIVRO_TRADUZIDO.md     # Translated markdown
+│   ├── LIVRO_TRADUZIDO.pdf    # Final PDF with images
+│   └── img_manifest/          # Extracted images
+│       ├── manifest.json      # Image metadata
+│       └── page_XXX_img_XX.png
+└── logs/
     └── translate_YYYYMMDD_HHMMSS.log
 ```
 
-## Logging
+## Dependencies
 
-Structured logging with performance metrics:
-- Session duration and processing speed
-- Token usage and cost breakdown
-- Error tracking and retry attempts
-- Chunk-level processing times
-- API response codes and latency
+### Python Libraries
+- **Core**: `openai>=1.0.0`, `rich>=13.0.0`, `PyMuPDF>=1.23.0`
+- **PDF**: `pdfplumber>=0.7.0`, `PyPDF2>=3.0.0`, `markdown-pdf`
+- **OCR**: `paddleocr>=2.8.0`, `paddlepaddle>=2.6.0`, `pytesseract>=0.3.10`
+- **Images**: `Pillow>=9.0.0`, `opencv-python>=4.8.0`
 
-## Requirements
+### External Programs  
+- **Pandoc**: Fallback PDF generation (https://pandoc.org)
+- **PaddleOCR**: Primary OCR engine (auto-installed)
 
-- Python 3.8+
-- OpenAI API key
-- 2GB+ RAM for OCR processing
-- Internet connection for API calls
-- Pandoc + LaTeX for PDF generation (optional)
+## Advanced Usage
+
+### Batch Processing
+```bash
+# Multiple page ranges
+for pages in "1-50" "51-100" "101-150"; do
+    ocrack document.pdf --pages "$pages" -o "batch_$pages"
+done
+```
+
+### Cost (gpt-4o-mini)
+- Input: $0.15/1K tokens, Output: $0.60/1K tokens  
+- Typical: $0.001-0.01 per page
+- Cache savings: Up to 50% on repeated content
 
 ## License
 

@@ -11,7 +11,12 @@ import platformdirs
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
-console = Console()
+# Temporarily use simple print for Windows compatibility
+class SimpleConsole:
+    def print(self, *args, **kwargs):
+        print(*args, **kwargs)
+        
+console = SimpleConsole()
 
 
 def slugify(text: str) -> str:
@@ -63,10 +68,10 @@ class Checkpoint:
             try:
                 with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
                     self.data = json.load(f)
-                console.print(f"[green]✓[/green] Checkpoint loaded: resuming from chunk {self.data.get('next_index', 0)}")
+                print(f"Checkpoint loaded: resuming from chunk {self.data.get('next_index', 0)}")
                 return self.data
             except (json.JSONDecodeError, IOError) as e:
-                console.print(f"[yellow]Warning:[/yellow] Could not load checkpoint: {e}")
+                print(f"Warning: Could not load checkpoint: {e}")
         
         return {}
     
@@ -79,7 +84,7 @@ class Checkpoint:
             with open(self.checkpoint_file, 'w', encoding='utf-8') as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
         except IOError as e:
-            console.print(f"[red]Error:[/red] Could not save checkpoint: {e}")
+            print(f"Error: Could not save checkpoint: {e}")
     
     def get_next_index(self) -> int:
         """Get the next chunk index to process."""
@@ -102,7 +107,7 @@ class Checkpoint:
         """Clear checkpoint file."""
         if self.checkpoint_file.exists():
             self.checkpoint_file.unlink()
-            console.print("[green]SUCCESS[/green] Checkpoint cleared")
+            print("SUCCESS: Checkpoint cleared")
 
 
 def get_cache_dir() -> Path:
@@ -171,22 +176,22 @@ def create_progress_bar(description: str = "Processing"):
 
 def log_info(message: str):
     """Log an info message."""
-    console.print(f"[blue]INFO[/blue] {message}")
+    print(f"INFO {message}")
 
 
 def log_success(message: str):
     """Log a success message."""
-    console.print(f"[green]SUCCESS[/green] {message}")
+    print(f"SUCCESS {message}")
 
 
 def log_warning(message: str):
     """Log a warning message."""
-    console.print(f"[yellow]WARNING[/yellow] {message}")
+    print(f"WARNING {message}")
 
 
 def log_error(message: str):
     """Log an error message."""
-    console.print(f"[red]ERROR[/red] {message}")
+    print(f"ERROR {message}")
 
 
 def validate_pdf_path(pdf_path: str) -> Path:

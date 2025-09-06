@@ -8,13 +8,14 @@ import fitz  # PyMuPDF
 from .utils import console, log_info, log_warning, log_error, ensure_output_dir
 
 
-def extract_image_manifest(pdf_path: Path, output_dir: Path) -> Dict:
+def extract_image_manifest(pdf_path: Path, output_dir: Path, target_pages: List[int] = None) -> Dict:
     """
-    Extract all images from PDF and create a manifest.
+    Extract images from PDF and create a manifest.
     
     Args:
         pdf_path: Path to source PDF
         output_dir: Directory to save extracted images
+        target_pages: List of specific pages to extract images from (1-based). If None, extracts from all pages.
         
     Returns:
         Dictionary with image manifest information
@@ -34,9 +35,16 @@ def extract_image_manifest(pdf_path: Path, output_dir: Path) -> Dict:
         doc = fitz.open(pdf_path)
         total_images = 0
         
-        log_info(f"Extracting images from {len(doc)} pages...")
+        # Determine which pages to process
+        if target_pages is None:
+            pages_to_process = range(len(doc))
+            log_info(f"Extracting images from {len(doc)} pages...")
+        else:
+            # Convert 1-based page numbers to 0-based indices
+            pages_to_process = [p - 1 for p in target_pages if 1 <= p <= len(doc)]
+            log_info(f"Extracting images from {len(pages_to_process)} specified pages...")
         
-        for page_num in range(len(doc)):
+        for page_num in pages_to_process:
             page = doc[page_num]
             page_images = []
             

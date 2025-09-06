@@ -8,6 +8,86 @@ from typing import List, Tuple, Optional
 from .utils import console, log_info, log_warning, log_error, log_success, slugify, ensure_output_dir
 
 
+def _insert_images_into_markdown(markdown_content: str, manifest: dict, images_dir: Path) -> str:
+    """
+    Insert images from manifest into markdown content at appropriate locations.
+    
+    Args:
+        markdown_content: Original markdown content
+        manifest: Image manifest with page and coordinate information
+        images_dir: Directory containing extracted images
+        
+    Returns:
+        Modified markdown content with image references
+    """
+    import re
+    
+    # Look for figure references in the markdown
+    figure_patterns = [
+        r'Figura\s+(\d+[-\w]*):',  # Portuguese "Figura X-Y:"
+        r'Figure\s+(\d+[-\w]*):',  # English "Figure X-Y:"
+    ]
+    
+    modified_content = markdown_content
+    
+    # Process each image in the manifest
+    for page_str, images in manifest.items():
+        if not page_str.startswith('page_'):
+            continue
+            
+        page_num = int(page_str.replace('page_', ''))
+        
+        for image_info in images:
+            image_name = image_info['name']
+            image_path = images_dir / image_name
+            
+            if image_path.exists():
+                # Try to find figure reference to insert image after
+                for pattern in figure_patterns:
+                    matches = list(re.finditer(pattern, modified_content))
+                    for match in matches:
+                        figure_ref = match.group(0)
+                        figure_num = match.group(1)
+                        
+                        # Insert image after the figure reference
+                        image_markdown = f"\n\n![{figure_ref}]({image_path.as_posix()})\n\n"
+                        
+                        # Find the end of the line containing the figure reference
+                        line_end = modified_content.find('\n', match.end())
+                        if line_end == -1:
+                            line_end = len(modified_content)
+                        
+                        # Insert image after the figure reference line
+                        modified_content = (
+                            modified_content[:line_end] + 
+                            image_markdown + 
+                            modified_content[line_end:]
+                        )
+                        
+                        log_info(f"Inserted image {image_name} after {figure_ref}")
+                        break
+                else:
+                    # If no figure reference found, try to insert based on page context
+                    # This is a fallback for images without explicit figure references
+                    image_markdown = f"\n\n![Image from page {page_num}]({image_path.as_posix()})\n\n"
+                    
+                    # Insert at the end of content for now (simple fallback)
+                    if f"page {page_num}" in modified_content.lower():
+                        # Try to insert near content that mentions this page
+                        page_mention = re.search(rf'page\s+{page_num}\b', modified_content, re.IGNORECASE)
+                        if page_mention:
+                            insert_pos = modified_content.find('\n\n', page_mention.end())
+                            if insert_pos != -1:
+                                modified_content = (
+                                    modified_content[:insert_pos] + 
+                                    image_markdown + 
+                                    modified_content[insert_pos:]
+                                )
+                                log_info(f"Inserted image {image_name} near page {page_num} reference")
+    
+    return modified_content
+
+
 def write_chapter_file(output_dir: Path, chapter_num: int, title: str, content: str) -> Path:
     """
     Write a single chapter to a markdown file.
@@ -125,6 +205,20 @@ def check_pandoc_available() -> bool:
     return _get_pandoc_path() is not None
 
 
+def _add_miktex_to_path():
+    """
+    Add MiKTeX to PATH on Windows if available.
+    """
+    import os
+    if os.name == 'nt':  # Windows only
+        miktex_path = r"C:\Users\Marcos\AppData\Local\Programs\MiKTeX\miktex\bin\x64"
+        if os.path.exists(miktex_path):
+            current_path = os.environ.get('PATH', '')
+            if miktex_path not in current_path:
+                os.environ['PATH'] = f"{current_path};{miktex_path}"
+                log_info(f"Added MiKTeX to PATH: {miktex_path}")
+
+
 def check_xelatex_available() -> bool:
     """
     Check if xelatex is available in PATH.
@@ -132,34 +226,139 @@ def check_xelatex_available() -> bool:
     Returns:
         True if xelatex is available, False otherwise
     """
+    # First try adding MiKTeX to PATH
+    _add_miktex_to_path()
     return shutil.which("xelatex") is not None
 
 
-def generate_pdf(markdown_path: Path, output_path: Optional[Path] = None) -> Path:
+def _check_pdflatex_available() -> bool:
     """
-    Generate PDF from markdown using pandoc with HTML fallback.
+    Check if pdflatex is available in PATH.
+    
+    Returns:
+        True if pdflatex is available, False otherwise
+    """
+    # First try adding MiKTeX to PATH
+    _add_miktex_to_path()
+    return shutil.which("pdflatex") is not None
+
+
+def generate_pdf_python(markdown_path: Path, output_path: Optional[Path] = None, 
+                        images_dir: Optional[Path] = None) -> Path:
+    """
+    Generate PDF using Python markdown-pdf library with image reinsertion (preferred method).
     
     Args:
         markdown_path: Path to markdown file
         output_path: Optional output PDF path (default: same name as markdown)
+        images_dir: Optional directory containing extracted images for reinsertion
         
     Returns:
         Path to generated PDF
         
     Raises:
-        Exception: If pandoc not available, or conversion fails with all methods
+        Exception: If PDF generation fails
     """
-    if not check_pandoc_available():
-        raise Exception(
-            "pandoc is not installed or not in PATH. Please install pandoc:\n"
-            "  Windows: https://pandoc.org/installing.html\n"
-            "  Linux: sudo apt-get install pandoc\n"
-            "  macOS: brew install pandoc"
-        )
+    try:
+        from markdown_pdf import MarkdownPdf, Section
+        import json
+        import re
+        
+        if output_path is None:
+            output_path = markdown_path.with_suffix('.pdf')
+        
+        log_info(f"Generating PDF with markdown-pdf: {output_path}")
+        
+        # Read markdown content
+        with open(markdown_path, 'r', encoding='utf-8') as f:
+            markdown_content = f.read()
+        
+        # Check for images directory and manifest
+        if images_dir and images_dir.exists():
+            manifest_file = images_dir / "manifest.json"
+            if manifest_file.exists():
+                log_info(f"Found image manifest, processing images for reinsertion...")
+                
+                try:
+                    with open(manifest_file, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                    
+                    # Process images and insert into markdown
+                    markdown_content = _insert_images_into_markdown(markdown_content, manifest, images_dir)
+                    log_success(f"Images successfully inserted into markdown from manifest")
+                    
+                except Exception as e:
+                    log_warning(f"Could not process image manifest: {e}")
+        
+        # Create PDF and disable TOC manually
+        pdf = MarkdownPdf()
+        
+        # Add the translated markdown content with images
+        pdf.add_section(Section(markdown_content))
+        
+        # Manually clear TOC to avoid hierarchy errors  
+        pdf.toc = []
+        
+        # Generate PDF
+        pdf.save(str(output_path))
+        
+        log_success(f"PDF generated successfully with markdown-pdf: {output_path}")
+        return output_path
+        
+    except ImportError as e:
+        log_error(f"Required libraries not installed: {e}. Install with: pip install markdown-pdf")
+        raise Exception("markdown-pdf library not available")
+    except Exception as e:
+        log_error(f"PDF generation failed: {e}")
+        # Fallback to HTML
+        return _generate_html_fallback(markdown_path, output_path)
+
+
+def generate_pdf(markdown_path: Path, output_path: Optional[Path] = None, 
+                  images_dir: Optional[Path] = None) -> Path:
+    """
+    Generate PDF from markdown using Python library first, then pandoc fallback.
     
-    if not check_xelatex_available():
+    Args:
+        markdown_path: Path to markdown file
+        output_path: Optional output PDF path (default: same name as markdown)
+        images_dir: Optional directory containing extracted images for reinsertion
+        
+    Returns:
+        Path to generated PDF
+        
+    Raises:
+        Exception: If all methods fail
+    """
+    # Try Python method first (preferred)
+    try:
+        return generate_pdf_python(markdown_path, output_path, images_dir)
+    except Exception as e:
+        log_warning(f"Python PDF generation failed: {e}. Trying Pandoc fallback...")
+    
+    # Fallback to Pandoc method
+    if not check_pandoc_available():
+        log_error("Neither Python PDF generation nor Pandoc are available")
+        # Generate HTML as final fallback
+        return _generate_html_fallback(markdown_path, output_path or markdown_path.with_suffix('.pdf'))
+    
+    # Ensure MiKTeX is in PATH before checking
+    _add_miktex_to_path()
+    
+    has_xelatex = check_xelatex_available()
+    has_pdflatex = _check_pdflatex_available()
+    
+    if not has_xelatex and not has_pdflatex:
         log_warning(
-            "xelatex not found. PDF generation will use default engine.\n"
+            "Neither xelatex nor pdflatex found. PDF generation may fail.\n"
+            "Please ensure MiKTeX or TeX Live is properly installed:\n"
+            "  Windows: Install MiKTeX or TeX Live\n"
+            "  Linux: sudo apt-get install texlive-xetex\n"
+            "  macOS: brew install --cask mactex"
+        )
+    elif not has_xelatex:
+        log_warning(
+            "xelatex not found. PDF generation will use pdflatex.\n"
             "For better Unicode support, install XeLaTeX:\n"
             "  Windows: Install MiKTeX or TeX Live\n"
             "  Linux: sudo apt-get install texlive-xetex\n"
@@ -202,7 +401,7 @@ def generate_pdf(markdown_path: Path, output_path: Optional[Path] = None) -> Pat
             pandoc_path,
             abs_markdown_path,
             "-o", abs_output_path,
-            "--pdf-engine=xelatex" if check_xelatex_available() else "--pdf-engine=pdflatex",
+            "--pdf-engine=xelatex" if has_xelatex else "--pdf-engine=pdflatex",
             "--variable", "geometry:margin=1in",
             "--variable", "fontsize=11pt",
             "--variable", "mainfont=DejaVu Serif",  # Good Unicode support

@@ -38,6 +38,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "paddlepaddle>=2.6.0",
     "paddleocr>=2.8.0",
+    "markdown-pdf>=0.1.0",
 ]
 
 [project.optional-dependencies]
