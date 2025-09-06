@@ -1,655 +1,563 @@
 """Assembly of translated chapters and PDF generation."""
 
-import shutil
-import subprocess
+import json
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from .utils import console, log_info, log_warning, log_error, log_success, slugify, ensure_output_dir
-
-
-def _insert_images_into_markdown(markdown_content: str, manifest: dict, images_dir: Path) -> str:
-    """
-    Insert images from manifest into markdown content at appropriate locations.
-    
-    Args:
-        markdown_content: Original markdown content
-        manifest: Image manifest with page and coordinate information
-        images_dir: Directory containing extracted images
-        
-    Returns:
-        Modified markdown content with image references
-    """
-    import re
-    
-    # Look for figure references in the markdown
-    figure_patterns = [
-        r'Figura\s+(\d+[-\w]*):',  # Portuguese "Figura X-Y:"
-        r'Figure\s+(\d+[-\w]*):',  # English "Figure X-Y:"
-    ]
-    
-    modified_content = markdown_content
-    
-    # Process each image in the manifest
-    for page_str, images in manifest.items():
-        if not page_str.startswith('page_'):
-            continue
-            
-        page_num = int(page_str.replace('page_', ''))
-        
-        for image_info in images:
-            image_name = image_info['name']
-            image_path = images_dir / image_name
-            
-            if image_path.exists():
-                # Try to find figure reference to insert image after
-                for pattern in figure_patterns:
-                    matches = list(re.finditer(pattern, modified_content))
-                    for match in matches:
-                        figure_ref = match.group(0)
-                        figure_num = match.group(1)
-                        
-                        # Insert image after the figure reference
-                        image_markdown = f"\n\n![{figure_ref}]({image_path.as_posix()})\n\n"
-                        
-                        # Find the end of the line containing the figure reference
-                        line_end = modified_content.find('\n', match.end())
-                        if line_end == -1:
-                            line_end = len(modified_content)
-                        
-                        # Insert image after the figure reference line
-                        modified_content = (
-                            modified_content[:line_end] + 
-                            image_markdown + 
-                            modified_content[line_end:]
-                        )
-                        
-                        log_info(f"Inserted image {image_name} after {figure_ref}")
-                        break
-                else:
-                    # If no figure reference found, try to insert based on page context
-                    # This is a fallback for images without explicit figure references
-                    image_markdown = f"\n\n![Image from page {page_num}]({image_path.as_posix()})\n\n"
-                    
-                    # Insert at the end of content for now (simple fallback)
-                    if f"page {page_num}" in modified_content.lower():
-                        # Try to insert near content that mentions this page
-                        page_mention = re.search(rf'page\s+{page_num}\b', modified_content, re.IGNORECASE)
-                        if page_mention:
-                            insert_pos = modified_content.find('\n\n', page_mention.end())
-                            if insert_pos != -1:
-                                modified_content = (
-                                    modified_content[:insert_pos] + 
-                                    image_markdown + 
-                                    modified_content[insert_pos:]
-                                )
-                                log_info(f"Inserted image {image_name} near page {page_num} reference")
-    
-    return modified_content
-
-
-def write_chapter_file(output_dir: Path, chapter_num: int, title: str, content: str) -> Path:
-    """
-    Write a single chapter to a markdown file.
-    
-    Args:
-        output_dir: Output directory
-        chapter_num: Chapter number
-        title: Chapter title
-        content: Translated content
-        
-    Returns:
-        Path to written file
-    """
-    ensure_output_dir(output_dir)
-    
-    slug = slugify(title)
-    filename = f"{chapter_num:02d}_{slug}.md"
-    file_path = output_dir / filename
-    
-    # Prepare chapter content with title
-    chapter_content = f"# {title}\n\n{content}"
-    
-    try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(chapter_content)
-        
-        log_info(f"Chapter {chapter_num} saved to {filename}")
-        return file_path
-        
-    except IOError as e:
-        log_error(f"Failed to write chapter file {filename}: {e}")
-        raise
-
+from .utils import log_info, log_warning, log_error, log_success, slugify, ensure_output_dir
 
 def assemble_full_document(output_dir: Path, chapters: List[Tuple[str, str]], 
-                          original_title: str = "Documento Traduzido") -> Path:
-    """
-    Assemble all chapters into a single markdown document.
-    
-    Args:
-        output_dir: Output directory
-        chapters: List of (title, content) tuples
-        original_title: Title for the full document
-        
-    Returns:
-        Path to assembled document
-    """
+                           output_filename_stem: str, original_title: str = "Documento Traduzido") -> Path:
+    """Assemble all chapters into a single markdown document."""
     ensure_output_dir(output_dir)
-    
-    full_doc_path = output_dir / "LIVRO_TRADUZIDO.md"
+    full_doc_path = output_dir / f"{output_filename_stem}.md"
     
     try:
         with open(full_doc_path, 'w', encoding='utf-8') as f:
             # Write document title
             f.write(f"# {original_title}\n\n")
-            f.write("---\n\n")
-            
-            # Write table of contents
-            f.write("## Sumário\n\n")
-            for i, (title, _) in enumerate(chapters, 1):
-                f.write(f"{i}. [{title}](#{slugify(title)})\n")
-            f.write("\n---\n\n")
-            
-            # Write chapters
-            for i, (title, content) in enumerate(chapters, 1):
-                f.write(f"# {title} {{#{slugify(title)}}}\n\n")
+            # Write content
+            for _, content in chapters:
                 f.write(content)
-                
-                # Add page break hint for PDF generation
-                if i < len(chapters):
-                    f.write("\n\n\\pagebreak\n\n")
-        
         log_success(f"Full document assembled: {full_doc_path}")
         return full_doc_path
-        
     except IOError as e:
         log_error(f"Failed to assemble full document: {e}")
         raise
 
-
-def _get_pandoc_path() -> Optional[str]:
+def _insert_images_into_markdown(markdown_content: str, manifest: dict, images_dir: Path) -> str:
     """
-    Get the path to pandoc executable.
-    
-    Returns:
-        Path to pandoc executable or None if not found
-    """
-    # First try standard PATH lookup
-    pandoc_path = shutil.which("pandoc")
-    if pandoc_path is not None:
-        return pandoc_path
-    
-    # Try common Windows installation paths
-    import os
-    windows_paths = [
-        r"C:\Program Files\Pandoc\pandoc.exe",
-        r"C:\Program Files (x86)\Pandoc\pandoc.exe",
-        r"C:\Users\{}\AppData\Local\Pandoc\pandoc.exe".format(os.getenv('USERNAME', ''))
-    ]
-    
-    for path in windows_paths:
-        if os.path.exists(path):
-            return path
-    
-    return None
-
-
-def check_pandoc_available() -> bool:
-    """
-    Check if pandoc is available in PATH or standard Windows locations.
-    
-    Returns:
-        True if pandoc is available, False otherwise
-    """
-    return _get_pandoc_path() is not None
-
-
-def _add_miktex_to_path():
-    """
-    Add MiKTeX to PATH on Windows if available.
-    """
-    import os
-    if os.name == 'nt':  # Windows only
-        miktex_path = r"C:\Users\Marcos\AppData\Local\Programs\MiKTeX\miktex\bin\x64"
-        if os.path.exists(miktex_path):
-            current_path = os.environ.get('PATH', '')
-            if miktex_path not in current_path:
-                os.environ['PATH'] = f"{current_path};{miktex_path}"
-                log_info(f"Added MiKTeX to PATH: {miktex_path}")
-
-
-def check_xelatex_available() -> bool:
-    """
-    Check if xelatex is available in PATH.
-    
-    Returns:
-        True if xelatex is available, False otherwise
-    """
-    # First try adding MiKTeX to PATH
-    _add_miktex_to_path()
-    return shutil.which("xelatex") is not None
-
-
-def _check_pdflatex_available() -> bool:
-    """
-    Check if pdflatex is available in PATH.
-    
-    Returns:
-        True if pdflatex is available, False otherwise
-    """
-    # First try adding MiKTeX to PATH
-    _add_miktex_to_path()
-    return shutil.which("pdflatex") is not None
-
-
-def generate_pdf_python(markdown_path: Path, output_path: Optional[Path] = None, 
-                        images_dir: Optional[Path] = None) -> Path:
-    """
-    Generate PDF using Python markdown-pdf library with image reinsertion (preferred method).
+    Insert images from manifest into markdown content at appropriate positions.
     
     Args:
-        markdown_path: Path to markdown file
-        output_path: Optional output PDF path (default: same name as markdown)
-        images_dir: Optional directory containing extracted images for reinsertion
+        markdown_content: The translated markdown content
+        manifest: Image manifest with coordinates and filenames
+        images_dir: Directory containing extracted images
         
     Returns:
-        Path to generated PDF
-        
-    Raises:
-        Exception: If PDF generation fails
+        Markdown content with image references inserted
     """
+    if not manifest or not images_dir.exists():
+        return markdown_content
+    
+    # Extract all images from the manifest structure
+    all_images = []
+    pages = manifest.get('pages', {})
+    for page_key, page_data in pages.items():
+        images = page_data.get('images', [])
+        for img in images:
+            all_images.append(img)
+    
+    if not all_images:
+        log_info("No images found in manifest to insert")
+        return markdown_content
+    
+    log_info(f"Processing {len(all_images)} images for insertion...")
+    
+    # Split content into lines for processing
+    lines = markdown_content.split('\n')
+    result_lines = []
+    
+    # Track which images we've inserted to avoid duplicates
+    inserted_images = set()
+    
+    for line in lines:
+        result_lines.append(line)
+        
+        # Insert images after headers, at the beginning of sections
+        if line.strip().startswith('#') and line.strip():
+            # Find images that haven't been inserted yet
+            section_images = []
+            for img_info in all_images:
+                img_filename = img_info.get('filename', '')
+                if img_filename and img_filename not in inserted_images:
+                    # Insert images that haven't been used yet
+                    section_images.append(img_info)
+                    inserted_images.add(img_filename)
+                    
+                    # Only insert a few images per section to avoid cluttering
+                    if len(section_images) >= 2:
+                        break
+            
+            # Add image references
+            for img_info in section_images:
+                img_filename = img_info.get('filename', '')
+                if img_filename:
+                    img_path = images_dir / img_filename
+                    if img_path.exists():
+                        # Use relative path for markdown
+                        relative_path = f"img_manifest/{img_filename}"
+                        result_lines.append("")
+                        result_lines.append(f"![Imagem extraída]({relative_path})")
+                        result_lines.append("")
+    
+    # If we still have uninserted images, add them at the end
+    remaining_images = []
+    for img_info in all_images:
+        img_filename = img_info.get('filename', '')
+        if img_filename and img_filename not in inserted_images:
+            remaining_images.append(img_info)
+    
+    if remaining_images:
+        result_lines.append("")
+        result_lines.append("## Imagens Adicionais")
+        result_lines.append("")
+        
+        for img_info in remaining_images:
+            img_filename = img_info.get('filename', '')
+            if img_filename:
+                img_path = images_dir / img_filename
+                if img_path.exists():
+                    relative_path = f"img_manifest/{img_filename}"
+                    result_lines.append(f"![Imagem extraída]({relative_path})")
+                    result_lines.append("")
+    
+    final_content = '\n'.join(result_lines)
+    log_success(f"Images successfully inserted into markdown")
+    return final_content
+
+
+def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
+    """
+    Insert images into HTML content at appropriate positions based on manifest.
+    
+    Args:
+        html_content: The translated HTML content
+        images_dir: Directory containing extracted images and manifest
+        
+    Returns:
+        HTML content with images inserted at correct positions
+    """
+    manifest_file = images_dir / "manifest.json"
+    if not manifest_file.exists():
+        log_warning("No manifest.json found for image insertion")
+        return html_content
+    
     try:
-        from markdown_pdf import MarkdownPdf, Section
-        import json
+        with open(manifest_file, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        
+        pages = manifest.get('pages', {})
+        if not pages:
+            log_info("No images found in manifest")
+            return html_content
+        
+        # Extract all images with their page info
+        images_to_insert = []
+        for page_key, page_data in pages.items():
+            images = page_data.get('images', [])
+            for img in images:
+                img_filename = img.get('filename', '')
+                if img_filename:
+                    img_path = images_dir / img_filename
+                    if img_path.exists():
+                        images_to_insert.append({
+                            'filename': img_filename,
+                            'page': int(page_key),
+                            'path': img_path,
+                            'rects': img.get('rects', [])
+                        })
+        
+        if not images_to_insert:
+            log_info("No valid images found for insertion")
+            return html_content
+        
+        log_info(f"Inserting {len(images_to_insert)} images into HTML content")
+        
+        # Sort images by page order
+        images_to_insert.sort(key=lambda x: x['page'])
+        
+        # Insert images before "Figura XYZ" references
         import re
         
-        if output_path is None:
-            output_path = markdown_path.with_suffix('.pdf')
+        # First try to find "Figura" references to place images correctly
+        figura_pattern = r'(<p[^>]*>.*?Figura\s+\d+.*?</p>)'
+        figura_matches = list(re.finditer(figura_pattern, html_content, re.IGNORECASE | re.DOTALL))
         
-        log_info(f"Generating PDF with markdown-pdf: {output_path}")
+        modified_content = html_content
+        inserted_count = 0
         
-        # Read markdown content
-        with open(markdown_path, 'r', encoding='utf-8') as f:
-            markdown_content = f.read()
+        # Process from end to beginning to avoid position shifting issues
+        figura_matches.reverse()
         
-        # Check for images directory and manifest
+        # Insert images before "Figura X" references (working backwards)
+        for i, match in enumerate(figura_matches):
+            if inserted_count >= len(images_to_insert):
+                break
+                
+            # Get the last available image (since we're working backwards)
+            img_info = images_to_insert[-(inserted_count + 1)]
+            
+            # Convert image to base64 for reliable PDF rendering
+            try:
+                import base64
+                with open(img_info["path"], 'rb') as img_file:
+                    img_data = img_file.read()
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                    # Detect image format
+                    img_ext = img_info["path"].suffix.lower()
+                    if img_ext == '.png':
+                        mime_type = 'image/png'
+                    elif img_ext in ['.jpg', '.jpeg']:
+                        mime_type = 'image/jpeg'
+                    else:
+                        mime_type = 'image/png'  # default
+                    
+                    img_src = f"data:{mime_type};base64,{img_base64}"
+                    log_info(f"Inserting image as base64 before Figura: {img_info['filename']} ({len(img_data)} bytes)")
+            except Exception as e:
+                log_warning(f"Failed to convert image to base64: {e}")
+                img_src = img_info["path"].resolve().as_uri()  # fallback to file URI
+            
+            img_tag = f'\n<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
+            
+            # Insert the image before the "Figura" reference
+            insert_pos = match.start()
+            modified_content = modified_content[:insert_pos] + img_tag + modified_content[insert_pos:]
+            inserted_count += 1
+        
+        # If there are remaining images, add them at the end
+        if inserted_count < len(images_to_insert):
+            remaining_images_html = '\n<div class="additional-images">\n<h2>Imagens Adicionais</h2>\n'
+            for img_info in images_to_insert[inserted_count:]:
+                # Convert remaining images to base64
+                try:
+                    import base64
+                    with open(img_info["path"], 'rb') as img_file:
+                        img_data = img_file.read()
+                        img_base64 = base64.b64encode(img_data).decode('utf-8')
+                        img_ext = img_info["path"].suffix.lower()
+                        mime_type = 'image/png' if img_ext == '.png' else 'image/jpeg'
+                        img_src = f"data:{mime_type};base64,{img_base64}"
+                except Exception as e:
+                    log_warning(f"Failed to convert remaining image to base64: {e}")
+                    img_src = img_info["path"].resolve().as_uri()
+                
+                remaining_images_html += f'<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
+            remaining_images_html += '</div>\n'
+            modified_content += remaining_images_html
+        
+        log_success(f"Successfully inserted {len(images_to_insert)} images into HTML")
+        return modified_content
+        
+    except Exception as e:
+        log_error(f"Error inserting images into HTML: {e}")
+        return html_content
+
+
+def _get_professional_css() -> str:
+    """Return professional CSS for PDF generation."""
+    return """
+        body {
+            font-family: 'Arial', 'Helvetica', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            font-size: 11pt;
+            margin: 0;
+            padding: 0;
+        }
+        
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 0;
+        }
+        
+        h1, h2, h3, h4, h5, h6 {
+            font-weight: bold;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            color: #2c3e50;
+            page-break-after: avoid;
+        }
+        
+        h1 { font-size: 24pt; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        h2 { font-size: 18pt; color: #2980b9; }
+        h3 { font-size: 14pt; color: #8e44ad; }
+        
+        p {
+            margin: 1em 0;
+            text-align: justify;
+        }
+        
+        /* Code blocks with syntax highlighting */
+        pre {
+            background-color: #f8f8f8;
+            border: 1px solid #e1e1e8;
+            border-radius: 6px;
+            padding: 1em;
+            margin: 1em 0;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 9pt;
+            line-height: 1.4;
+            page-break-inside: avoid;
+        }
+        
+        code {
+            background-color: #f1f1f1;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 85%;
+            color: #e74c3c;
+        }
+        
+        pre code {
+            background-color: transparent;
+            padding: 0;
+            border-radius: 0;
+            color: inherit;
+        }
+        
+        /* Syntax highlighting */
+        .language-python .keyword { color: #0000ff; font-weight: bold; }
+        .language-javascript .keyword { color: #0000ff; font-weight: bold; }
+        .language-bash .keyword { color: #0000ff; font-weight: bold; }
+        
+        /* Images */
+        .image-container {
+            text-align: center;
+            margin: 1.5em 0;
+            page-break-inside: avoid;
+        }
+        
+        .inserted-image {
+            width: 100%;
+            max-width: 600px;
+            height: auto;
+            border: 1px solid #bdc3c7;
+            border-radius: 6px;
+            padding: 8px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            object-fit: contain;
+        }
+        
+        .additional-images {
+            margin-top: 2em;
+            border-top: 1px solid #ddd;
+            padding-top: 1em;
+        }
+        
+        /* Tables */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+            font-size: 10pt;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        
+        th {
+            background-color: #3498db;
+            color: white;
+            font-weight: bold;
+        }
+        
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        
+        /* Lists */
+        ul, ol {
+            margin: 1em 0;
+            padding-left: 2em;
+        }
+        
+        li {
+            margin: 0.3em 0;
+        }
+        
+        /* Blockquotes */
+        blockquote {
+            border-left: 4px solid #3498db;
+            padding-left: 1em;
+            margin: 1em 0;
+            font-style: italic;
+            color: #555;
+            background-color: #ecf0f1;
+            padding: 1em;
+            border-radius: 4px;
+        }
+        
+        @page {
+            margin: 2cm;
+            size: A4;
+        }
+        
+        @media print {
+            .container {
+                margin: 0;
+                padding: 0;
+            }
+        }
+    """
+
+
+def generate_pdf_from_html(html_content: str, output_path: Path, images_dir: Optional[Path] = None) -> Path:
+    """Generate PDF from HTML using Playwright (preferred) with fallback to markdown-pdf."""
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        # Insert images into HTML content at correct positions
+        if images_dir and images_dir.exists():
+            html_content = _insert_images_into_html(html_content, images_dir)
+        
+        # Create complete HTML document with professional styling
+        full_html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documento Traduzido</title>
+    <style>
+        {_get_professional_css()}
+    </style>
+</head>
+<body>
+    <div class="container">
+        {html_content}
+    </div>
+</body>
+</html>"""
+        
+        # Save HTML for debugging
+        html_debug_path = output_path.with_suffix('.html')
+        with open(html_debug_path, 'w', encoding='utf-8') as f:
+            f.write(full_html)
+        log_info(f"HTML debug file saved: {html_debug_path}")
+        
+        log_info(f"Generating PDF via Playwright: {output_path}")
+        
+        with sync_playwright() as p:
+            # Launch browser with file access permissions
+            browser = p.chromium.launch(args=['--allow-file-access-from-files', '--disable-web-security'])
+            page = browser.new_page()
+            page.set_content(full_html)
+            
+            # Wait for images to load
+            try:
+                page.wait_for_load_state('networkidle', timeout=10000)
+                page.wait_for_timeout(2000)  # Additional wait for images
+                log_info("Images loaded successfully")
+            except Exception as e:
+                log_warning(f"Image loading wait timed out: {e}")
+            
+            # Generate PDF with professional settings
+            page.pdf(
+                path=str(output_path),
+                format='A4',
+                margin={
+                    'top': '2cm',
+                    'bottom': '2cm',
+                    'left': '2cm',
+                    'right': '2cm'
+                },
+                print_background=True
+            )
+            
+            browser.close()
+        
+        log_success(f"PDF generated successfully via Playwright: {output_path}")
+        return output_path
+        
+    except ImportError:
+        log_warning("Playwright not available, falling back to markdown-pdf")
+        log_warning("Install Playwright with: pip install playwright && playwright install chromium")
+        return _fallback_to_markdown_pdf_from_html(html_content, output_path, images_dir)
+    except Exception as e:
+        log_error(f"Playwright PDF generation failed: {e}")
+        log_warning("Falling back to markdown-pdf method")
+        return _fallback_to_markdown_pdf_from_html(html_content, output_path, images_dir)
+
+
+def _fallback_to_markdown_pdf_from_html(html_content: str, output_path: Path, images_dir: Optional[Path] = None) -> Path:
+    """Fallback method when Playwright is not available."""
+    try:
+        from markdown_pdf import MarkdownPdf, Section
+        
+        log_warning("FALLBACK: Using markdown-pdf instead of Playwright")
+        log_warning("For better results, install Playwright: pip install playwright && playwright install chromium")
+        
+        # Convert HTML back to markdown (simple conversion)
+        # This is a basic fallback - ideally we'd keep the markdown version
+        import html2text
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = False
+        markdown_content = h.handle(html_content)
+        
+        # Apply image insertion to markdown
         if images_dir and images_dir.exists():
             manifest_file = images_dir / "manifest.json"
             if manifest_file.exists():
-                log_info(f"Found image manifest, processing images for reinsertion...")
-                
                 try:
                     with open(manifest_file, 'r', encoding='utf-8') as f:
                         manifest = json.load(f)
-                    
-                    # Process images and insert into markdown
                     markdown_content = _insert_images_into_markdown(markdown_content, manifest, images_dir)
-                    log_success(f"Images successfully inserted into markdown from manifest")
-                    
                 except Exception as e:
                     log_warning(f"Could not process image manifest: {e}")
         
-        # Create PDF and disable TOC manually
-        pdf = MarkdownPdf()
-        
-        # Add the translated markdown content with images
-        pdf.add_section(Section(markdown_content))
-        
-        # Manually clear TOC to avoid hierarchy errors  
-        pdf.toc = []
-        
-        # Generate PDF
+        pdf = MarkdownPdf(toc_level=2)
+        pdf.add_section(Section(markdown_content, toc=False))
         pdf.save(str(output_path))
         
-        log_success(f"PDF generated successfully with markdown-pdf: {output_path}")
+        log_success(f"PDF generated with fallback method: {output_path}")
         return output_path
         
-    except ImportError as e:
-        log_error(f"Required libraries not installed: {e}. Install with: pip install markdown-pdf")
-        raise Exception("markdown-pdf library not available")
     except Exception as e:
-        log_error(f"PDF generation failed: {e}")
-        # Fallback to HTML
-        return _generate_html_fallback(markdown_path, output_path)
-
-
-def generate_pdf(markdown_path: Path, output_path: Optional[Path] = None, 
-                  images_dir: Optional[Path] = None) -> Path:
-    """
-    Generate PDF from markdown using Python library first, then pandoc fallback.
-    
-    Args:
-        markdown_path: Path to markdown file
-        output_path: Optional output PDF path (default: same name as markdown)
-        images_dir: Optional directory containing extracted images for reinsertion
-        
-    Returns:
-        Path to generated PDF
-        
-    Raises:
-        Exception: If all methods fail
-    """
-    # Try Python method first (preferred)
-    try:
-        return generate_pdf_python(markdown_path, output_path, images_dir)
-    except Exception as e:
-        log_warning(f"Python PDF generation failed: {e}. Trying Pandoc fallback...")
-    
-    # Fallback to Pandoc method
-    if not check_pandoc_available():
-        log_error("Neither Python PDF generation nor Pandoc are available")
-        # Generate HTML as final fallback
-        return _generate_html_fallback(markdown_path, output_path or markdown_path.with_suffix('.pdf'))
-    
-    # Ensure MiKTeX is in PATH before checking
-    _add_miktex_to_path()
-    
-    has_xelatex = check_xelatex_available()
-    has_pdflatex = _check_pdflatex_available()
-    
-    if not has_xelatex and not has_pdflatex:
-        log_warning(
-            "Neither xelatex nor pdflatex found. PDF generation may fail.\n"
-            "Please ensure MiKTeX or TeX Live is properly installed:\n"
-            "  Windows: Install MiKTeX or TeX Live\n"
-            "  Linux: sudo apt-get install texlive-xetex\n"
-            "  macOS: brew install --cask mactex"
-        )
-    elif not has_xelatex:
-        log_warning(
-            "xelatex not found. PDF generation will use pdflatex.\n"
-            "For better Unicode support, install XeLaTeX:\n"
-            "  Windows: Install MiKTeX or TeX Live\n"
-            "  Linux: sudo apt-get install texlive-xetex\n"
-            "  macOS: brew install --cask mactex"
-        )
-    
-    if output_path is None:
-        output_path = markdown_path.with_suffix('.pdf')
-    
-    # Get pandoc executable path
-    pandoc_path = _get_pandoc_path()
-    if not pandoc_path:
-        raise Exception("pandoc executable not found")
-    
-    # Pandoc command with Portuguese-friendly settings
-    # Convert paths to absolute and use forward slashes for pandoc
-    abs_markdown_path = str(markdown_path.resolve()).replace('\\', '/')
-    abs_output_path = str(output_path.resolve()).replace('\\', '/')
-    
-    # Try wkhtmltopdf first, fall back to xelatex/pdflatex
-    wkhtmltopdf_available = shutil.which("wkhtmltopdf") is not None
-    
-    if wkhtmltopdf_available:
-        # Use wkhtmltopdf via pandoc (doesn't require LaTeX)
-        cmd = [
-            pandoc_path,
-            abs_markdown_path,
-            "-o", abs_output_path,
-            "--pdf-engine=wkhtmltopdf",
-            "--variable", "geometry:margin=1in",
-            "--variable", "fontsize=11pt",
-            "--toc",  # Table of contents
-            "--toc-depth=3",
-            "--number-sections",
-            "--highlight-style=tango",
-        ]
-    else:
-        # Fallback to LaTeX engines
-        cmd = [
-            pandoc_path,
-            abs_markdown_path,
-            "-o", abs_output_path,
-            "--pdf-engine=xelatex" if has_xelatex else "--pdf-engine=pdflatex",
-            "--variable", "geometry:margin=1in",
-            "--variable", "fontsize=11pt",
-            "--variable", "mainfont=DejaVu Serif",  # Good Unicode support
-            "--variable", "sansfont=DejaVu Sans",
-            "--variable", "monofont=DejaVu Sans Mono",
-            "--toc",  # Table of contents
-            "--toc-depth=3",
-            "--number-sections",
-            "--highlight-style=tango",
-            "--variable", "lang=pt-BR",
-            "--variable", "babel-lang=brazilian",
-        ]
-    
-    log_info(f"Generating PDF: {output_path}")
-    log_info(f"Command: {' '.join(cmd)}")
-    
-    try:
-        # Run pandoc
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            cwd=markdown_path.parent,
-            timeout=300  # 5 minutes timeout
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr or "Unknown error"
-            # If LaTeX/wkhtmltopdf failed, try HTML fallback
-            if not wkhtmltopdf_available and ("not found" in error_msg or "cannot be executed" in error_msg or "pdflatex" in error_msg or "xelatex" in error_msg):
-                log_warning("PDF generation failed with LaTeX, generating HTML instead...")
-                return _generate_html_fallback(markdown_path, output_path)
-            else:
-                raise Exception(f"Pandoc failed with return code {result.returncode}: {error_msg}")
-        
-        if result.stderr:
-            log_warning(f"Pandoc warnings: {result.stderr}")
-        
-        if not output_path.exists():
-            # Try HTML fallback if PDF wasn't created
-            log_warning("PDF was not created, generating HTML instead...")
-            return _generate_html_fallback(markdown_path, output_path)
-        
-        log_success(f"PDF generated: {output_path}")
-        return output_path
-        
-    except subprocess.TimeoutExpired:
-        raise Exception("PDF generation timed out (5 minutes)")
-    except Exception as e:
-        log_error(f"PDF generation failed: {e}")
-        # Try HTML fallback as last resort
-        if "HTML" not in str(e):  # Avoid infinite recursion
-            log_warning("Attempting HTML fallback...")
-            try:
-                return _generate_html_fallback(markdown_path, output_path)
-            except:
-                pass
+        log_error(f"Fallback PDF generation failed: {e}")
         raise
 
 
-def _generate_html_fallback(markdown_path: Path, output_path: Path) -> Path:
-    """Generate HTML as fallback when PDF generation fails."""
-    html_path = output_path.with_suffix('.html')
-    
-    pandoc_path = _get_pandoc_path()
-    if not pandoc_path:
-        raise Exception("pandoc executable not found")
-    
-    abs_markdown_path = str(markdown_path.resolve()).replace('\\', '/')
-    abs_html_path = str(html_path.resolve()).replace('\\', '/')
-    
-    cmd = [
-        pandoc_path,
-        abs_markdown_path,
-        "-o", abs_html_path,
-        "--toc",
-        "--toc-depth=3", 
-        "--number-sections",
-        "--highlight-style=tango",
-        "--standalone",
-        "--metadata", "title=From Day Zero to Zero Day",
-        "--css", "https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"
-    ]
-    
-    log_info(f"Generating HTML fallback: {html_path}")
-    
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        cwd=markdown_path.parent,
-        timeout=120
-    )
-    
-    if result.returncode != 0:
-        error_msg = result.stderr or "Unknown error"
-        raise Exception(f"HTML generation failed: {error_msg}")
-    
-    if not html_path.exists():
-        raise Exception("HTML was not created")
-    
-    log_success(f"HTML generated: {html_path}")
-    return html_path
-
-
-def create_pandoc_metadata(title: str, author: str = "", subject: str = "") -> str:
-    """
-    Create YAML metadata header for pandoc.
-    
-    Args:
-        title: Document title
-        author: Document author
-        subject: Document subject
-        
-    Returns:
-        YAML metadata string
-    """
-    metadata = f"""---
-title: "{title}"
-author: "{author}"
-subject: "{subject}"
-lang: pt-BR
-babel-lang: brazilian
-documentclass: article
-geometry: margin=1in
-fontsize: 11pt
-mainfont: "DejaVu Serif"
-sansfont: "DejaVu Sans"
-monofont: "DejaVu Sans Mono"
-toc: true
-toc-depth: 3
-numbersections: true
-highlight-style: tango
----
-
-"""
-    return metadata
-
-
-def add_metadata_to_markdown(markdown_path: Path, title: str, 
-                           author: str = "", subject: str = ""):
-    """
-    Add YAML metadata header to markdown file.
-    
-    Args:
-        markdown_path: Path to markdown file
-        title: Document title
-        author: Document author
-        subject: Document subject
-    """
+def _fallback_to_markdown_pdf(markdown_path: Path, images_dir: Optional[Path] = None) -> Path:
+    """Fallback to original markdown-pdf method if HTML conversion fails."""
     try:
-        # Read existing content
+        from markdown_pdf import MarkdownPdf, Section
+        
+        output_path = markdown_path.with_suffix('.pdf')
+        log_warning("Falling back to markdown-pdf method...")
+        
         with open(markdown_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+            markdown_content = f.read()
         
-        # Check if metadata already exists
-        if content.startswith('---'):
-            log_info("Markdown file already has metadata")
-            return
+        if images_dir and images_dir.exists():
+            manifest_file = images_dir / "manifest.json"
+            if manifest_file.exists():
+                try:
+                    with open(manifest_file, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                    markdown_content = _insert_images_into_markdown(markdown_content, manifest, images_dir)
+                except Exception as e:
+                    log_warning(f"Could not process image manifest: {e}")
         
-        # Add metadata
-        metadata = create_pandoc_metadata(title, author, subject)
-        new_content = metadata + content
+        pdf = MarkdownPdf(toc_level=2)
+        pdf.add_section(Section(markdown_content, toc=False))
+        pdf.save(str(output_path))
         
-        # Write back
-        with open(markdown_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
+        log_success(f"PDF generated with fallback method: {output_path}")
+        return output_path
         
-        log_info("Added metadata to markdown file")
-        
-    except IOError as e:
-        log_error(f"Failed to add metadata: {e}")
+    except Exception as e:
+        log_error(f"Fallback PDF generation also failed: {e}")
+        raise
 
 
-def get_pandoc_version() -> Optional[str]:
-    """Get pandoc version string."""
-    try:
-        result = subprocess.run(
-            ["pandoc", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        if result.returncode == 0:
-            # First line contains version
-            first_line = result.stdout.split('\n')[0]
-            return first_line
-        
-        return None
-        
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
+# Keep the old function name for compatibility
+def generate_pdf(markdown_path: Path, images_dir: Optional[Path] = None) -> Path:
+    """Generate PDF with HTML method first, fallback to markdown-pdf."""
+    return generate_pdf_from_html(markdown_path, images_dir)
 
+def add_metadata_to_markdown(markdown_path: Path, title: str, author: str = "", subject: str = ""):
+    """Adds YAML metadata header to a markdown file for context (not used by markdown-pdf)."""
+    pass # No longer needed for this PDF generation method
 
 def print_pdf_requirements():
-    """Print information about PDF generation requirements."""
-    console.print("\n[bold]PDF Generation Requirements:[/bold]")
-    
-    # Check pandoc
-    pandoc_available = check_pandoc_available()
-    pandoc_version = get_pandoc_version() if pandoc_available else None
-    
-    if pandoc_available:
-        console.print(f"  Pandoc: [green]{pandoc_version}[/green]")
-    else:
-        console.print("  Pandoc: [red]Not found[/red]")
-        console.print("    Install from: https://pandoc.org/installing.html")
-    
-    # Check XeLaTeX
-    xelatex_available = check_xelatex_available()
-    if xelatex_available:
-        console.print("  XeLaTeX: [green]Available[/green]")
-    else:
-        console.print("  XeLaTeX: [yellow]Not found (will use pdflatex)[/yellow]")
-        console.print("    Install TeX Live or MiKTeX for better Unicode support")
-    
-    console.print()
-
-
-def clean_markdown_for_pdf(content: str) -> str:
-    """
-    Clean markdown content for better PDF generation.
-    
-    Args:
-        content: Raw markdown content
-        
-    Returns:
-        Cleaned markdown content
-    """
-    import re
-    
-    # Fix common issues that cause problems in PDF generation
-    
-    # Escape underscores in URLs that aren't in code blocks
-    content = re.sub(r'(?<!`)(https?://[^\s`]+?)(?!`)', 
-                    lambda m: m.group(0).replace('_', r'\_'), 
-                    content)
-    
-    # Fix standalone underscores that might be interpreted as emphasis
-    content = re.sub(r'(?<!\w)_(?!\w)', r'\_', content)
-    
-    # Ensure proper spacing around headers
-    content = re.sub(r'\n(#+\s)', r'\n\n\1', content)
-    
-    # Fix table formatting issues
-    content = re.sub(r'\|(\s*-+\s*)\|', r'| \1 |', content)
-    
-    return content
+    pass # No longer needed
