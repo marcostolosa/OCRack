@@ -45,7 +45,7 @@ playwright install chromium
 ## Demo
 
 *Original*
-![](assets/en.png)
+![](assets/en-us.png)
 *Traduzido*
 ![](assets/pt-br.png)
 

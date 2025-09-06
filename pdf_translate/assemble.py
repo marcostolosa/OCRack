@@ -173,12 +173,53 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
         
         # First try to find "Figura" references to place images correctly
         # Match patterns like "Figura 7-2:", "Figura X:", "Figura X.Y:", etc.
-        figura_pattern = r'(<p[^>]*>.*?Figura\s+[\d\-\.]+.*?</p>)'
+        # IMPROVED: Look specifically for "Figura" followed by numbers/patterns and a colon
+        figura_pattern = r'(.*?)(Figura\s+[\d\-\.]+\s*:)'
         figura_matches = list(re.finditer(figura_pattern, html_content, re.IGNORECASE | re.DOTALL))
         
         log_info(f"Found {len(figura_matches)} 'Figura' references in HTML content")
         for i, match in enumerate(figura_matches):
-            log_info(f"  Figura {i+1}: {match.group(1)[:100]}...")
+            figura_text = match.group(2) if match.lastindex >= 2 else match.group(0)
+            log_info(f"  Figura {i+1}: {figura_text}")
+        
+        # Create a more intelligent mapping between figure numbers and images
+        # First, group images by page for better mapping
+        images_by_page = {}
+        for img in images_to_insert:
+            page = img['page']
+            if page not in images_by_page:
+                images_by_page[page] = []
+            images_by_page[page].append(img)
+        
+        log_info(f"Images grouped by page: {dict((k, len(v)) for k, v in images_by_page.items())}")
+        
+        # Extract figure numbers and create mapping
+        figure_to_image_map = {}
+        used_images = set()
+        
+        for i, match in enumerate(figura_matches):
+            if match.lastindex >= 2:
+                figura_text = match.group(2)
+                # Extract figure number/identifier from "Figura X:"
+                figure_match = re.search(r'Figura\s+([\d\-\.]+)', figura_text, re.IGNORECASE)
+                if figure_match:
+                    figure_id = figure_match.group(1)
+                    
+                    # Try to find the best matching image
+                    best_image = None
+                    
+                    # Strategy 1: Find unused image from the same or nearby pages
+                    for img in images_to_insert:
+                        if img['filename'] not in used_images:
+                            best_image = img
+                            used_images.add(img['filename'])
+                            break
+                    
+                    if best_image:
+                        figure_to_image_map[figure_id] = best_image
+                        log_info(f"  Mapped Figura {figure_id} to image: {best_image['filename']} (page {best_image['page']})")
+                    else:
+                        log_warning(f"  No available image found for Figura {figure_id}")
         
         modified_content = html_content
         inserted_count = 0
@@ -186,13 +227,44 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
         # Process from end to beginning to avoid position shifting issues
         figura_matches.reverse()
         
-        # Insert images before "Figura X" references (working backwards)
+        # Track which images have been inserted to avoid duplicates
+        inserted_image_filenames = set()
+        
+        # Insert images before "Figura X:" references (working backwards)
         for i, match in enumerate(figura_matches):
             if inserted_count >= len(images_to_insert):
                 break
-                
-            # Get the last available image (since we're working backwards)
-            img_info = images_to_insert[-(inserted_count + 1)]
+            
+            # Get figure ID to find the correct image
+            figura_text = match.group(2) if match.lastindex >= 2 else match.group(0)
+            figure_match = re.search(r'Figura\s+([\d\-\.]+)', figura_text, re.IGNORECASE)
+            
+            img_info = None
+            
+            if figure_match:
+                figure_id = figure_match.group(1)
+                # Use mapped image if available and not already inserted
+                if figure_id in figure_to_image_map:
+                    mapped_img = figure_to_image_map[figure_id]
+                    if mapped_img['filename'] not in inserted_image_filenames:
+                        img_info = mapped_img
+                        log_info(f"Using mapped image for Figura {figure_id}: {img_info['filename']}")
+            
+            # Fallback: find any unused image
+            if not img_info:
+                for potential_img in images_to_insert:
+                    if potential_img['filename'] not in inserted_image_filenames:
+                        img_info = potential_img
+                        log_info(f"Using fallback image: {img_info['filename']}")
+                        break
+            
+            # Skip if no image available
+            if not img_info:
+                log_warning(f"No available image for Figura reference at position {i}")
+                continue
+            
+            # Mark this image as used
+            inserted_image_filenames.add(img_info['filename'])
             
             # Convert image to base64 for reliable PDF rendering
             try:
@@ -217,15 +289,26 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
             
             img_tag = f'\n<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
             
-            # Insert the image before the "Figura" reference
-            insert_pos = match.start()
-            modified_content = modified_content[:insert_pos] + img_tag + modified_content[insert_pos:]
+            # Insert the image exactly before the "Figura X:" text
+            if match.lastindex >= 2:
+                # Insert before the "Figura X:" part (group 2)
+                figura_start = match.start(2)
+                modified_content = modified_content[:figura_start] + img_tag + modified_content[figura_start:]
+            else:
+                # Fallback: insert at the beginning of the match
+                insert_pos = match.start()
+                modified_content = modified_content[:insert_pos] + img_tag + modified_content[insert_pos:]
+            
             inserted_count += 1
+            log_info(f"Inserted image {img_info['filename']} before Figura reference")
         
-        # If there are remaining images, add them at the end
-        if inserted_count < len(images_to_insert):
+        # Add any remaining unused images at the end
+        remaining_images = [img for img in images_to_insert if img['filename'] not in inserted_image_filenames]
+        if remaining_images:
             remaining_images_html = '\n<div class="additional-images">\n<h2>Imagens Adicionais</h2>\n'
-            for img_info in images_to_insert[inserted_count:]:
+            log_info(f"Adding {len(remaining_images)} remaining images at the end")
+            
+            for img_info in remaining_images:
                 # Convert remaining images to base64
                 try:
                     import base64
@@ -235,6 +318,7 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
                         img_ext = img_info["path"].suffix.lower()
                         mime_type = 'image/png' if img_ext == '.png' else 'image/jpeg'
                         img_src = f"data:{mime_type};base64,{img_base64}"
+                        log_info(f"Adding remaining image: {img_info['filename']} from page {img_info['page']}")
                 except Exception as e:
                     log_warning(f"Failed to convert remaining image to base64: {e}")
                     img_src = img_info["path"].resolve().as_uri()
