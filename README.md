@@ -42,6 +42,13 @@ playwright install chromium
 # - Pandoc: https://pandoc.org/installing.html (fallback only)
 # - Tesseract OCR: https://github.com/tesseract-ocr/tesseract (fallback only)
 ```
+## Demo
+
+*Original*
+![](assets/en.png)
+*Traduzido*
+![](assets/pt-br.png)
+
 
 ## Usage
 

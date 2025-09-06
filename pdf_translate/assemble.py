@@ -172,8 +172,13 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
         import re
         
         # First try to find "Figura" references to place images correctly
-        figura_pattern = r'(<p[^>]*>.*?Figura\s+\d+.*?</p>)'
+        # Match patterns like "Figura 7-2:", "Figura X:", "Figura X.Y:", etc.
+        figura_pattern = r'(<p[^>]*>.*?Figura\s+[\d\-\.]+.*?</p>)'
         figura_matches = list(re.finditer(figura_pattern, html_content, re.IGNORECASE | re.DOTALL))
+        
+        log_info(f"Found {len(figura_matches)} 'Figura' references in HTML content")
+        for i, match in enumerate(figura_matches):
+            log_info(f"  Figura {i+1}: {match.group(1)[:100]}...")
         
         modified_content = html_content
         inserted_count = 0
