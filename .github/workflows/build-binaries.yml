@@ -29,7 +29,7 @@ jobs:
     
     - name: Build Windows x86 binary
       run: |
-        pyinstaller ocrack.spec --name ocrack-windows-x86 --distpath dist-x86
+        pyinstaller --onefile --name ocrack-windows-x86 --distpath dist-x86 pdf_translate/cli.py
     
     - name: Upload Windows x86 binary
       uses: actions/upload-artifact@v4
@@ -57,7 +57,7 @@ jobs:
     
     - name: Build Windows x64 binary
       run: |
-        pyinstaller ocrack.spec --name ocrack-windows-x64 --distpath dist-x64
+        pyinstaller --onefile --name ocrack-windows-x64 --distpath dist-x64 pdf_translate/cli.py
     
     - name: Upload Windows x64 binary
       uses: actions/upload-artifact@v4
@@ -89,7 +89,7 @@ jobs:
     
     - name: Build Linux x64 binary
       run: |
-        pyinstaller ocrack.spec --name ocrack-linux-x64 --distpath dist-linux
+        pyinstaller --onefile --name ocrack-linux-x64 --distpath dist-linux pdf_translate/cli.py
     
     - name: Upload Linux x64 binary
       uses: actions/upload-artifact@v4
