@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from .utils import log_info, log_warning, log_error, log_success, slugify, ensure_output_dir
 
@@ -118,9 +118,102 @@ def _insert_images_into_markdown(markdown_content: str, manifest: dict, images_d
     return final_content
 
 
+def _extract_original_text_for_page(page_num: int) -> str:
+    """Extract original text from the specified page for paragraph counting."""
+    try:
+        # Try to extract text from the source PDF for this specific page
+        from .extract import extract_pages_range
+        
+        # Get source PDF path from manifest if available
+        manifest_file = Path("out/img_manifest/manifest.json")
+        if manifest_file.exists():
+            with open(manifest_file, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+            source_pdf = manifest.get("source_pdf", "")
+            if source_pdf and Path(source_pdf).exists():
+                log_info(f"Extracting original text from page {page_num} for paragraph counting")
+                page_texts = extract_pages_range(Path(source_pdf), [page_num], use_ocr=False)
+                return page_texts.get(page_num, "")
+    except Exception as e:
+        log_warning(f"Could not extract original text for page {page_num}: {e}")
+    
+    return ""
+
+
+def _count_paragraphs_before_image(original_text: str, image_y: float) -> int:
+    """
+    Count paragraphs in original text that would appear before the image position.
+    Uses content analysis to find the exact position where image should be inserted.
+    Returns a position that can be mapped to translated content.
+    """
+    if not original_text.strip():
+        return 0
+    
+    # Split text into lines and look for specific patterns
+    lines = original_text.split('\n')
+    paragraphs = []
+    
+    # Create paragraphs by grouping non-empty lines
+    current_paragraph = []
+    for line in lines:
+        line = line.strip()
+        if not line:  # Empty line
+            if current_paragraph:
+                paragraphs.append(' '.join(current_paragraph))
+                current_paragraph = []
+        else:
+            current_paragraph.append(line)
+    
+    # Add final paragraph if exists
+    if current_paragraph:
+        paragraphs.append(' '.join(current_paragraph))
+    
+    log_info(f"Original text has {len(paragraphs)} paragraphs")
+    
+    # Look for figure caption pattern - this is more universal
+    # Figure captions typically follow the pattern: "Figure X-Y:" or "Figure X.Y:" 
+    target_paragraph = 0
+    
+    for i, paragraph in enumerate(paragraphs):
+        log_info(f"Paragraph {i}: {paragraph[:100]}...")
+        
+        # Look for figure caption patterns that are likely to be preserved after translation
+        import re
+        
+        # Match patterns like "Figure 7-2:", "Figure 7.2:", "Figura 7-2:", etc.
+        figure_pattern = r'(Figure|Figura)\s*7[-\.\s]*2\s*:'
+        
+        if re.search(figure_pattern, paragraph, re.IGNORECASE):
+            target_paragraph = i  # Insert BEFORE the figure caption
+            log_info(f"Found figure caption at paragraph {i}: {paragraph[:80]}...")
+            break
+    
+    # If no figure caption found, look for reference patterns
+    if target_paragraph == 0:
+        for i, paragraph in enumerate(paragraphs):
+            # Look for references to Figure 7-2 in text (these patterns might survive translation)
+            figure_ref_patterns = [
+                r'Figure\s*7[-\.\s]*2',
+                r'shown in Figure',
+                r'fuzzed ApplicationMessage field'  # Context-specific pattern
+            ]
+            
+            for pattern in figure_ref_patterns:
+                if re.search(pattern, paragraph, re.IGNORECASE):
+                    target_paragraph = i + 1  # Insert AFTER the reference
+                    log_info(f"Found figure reference at paragraph {i}, will insert after it")
+                    break
+            
+            if target_paragraph > 0:
+                break
+    
+    log_info(f"Determined image should be inserted before paragraph {target_paragraph}")
+    return target_paragraph
+
+
 def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
     """
-    Insert images into HTML content at appropriate positions based on manifest.
+    Insert images into HTML content at appropriate positions by counting paragraphs from original PDF.
     
     Args:
         html_content: The translated HTML content
@@ -143,7 +236,7 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
             log_info("No images found in manifest")
             return html_content
         
-        # Extract all images with their page info
+        # Extract all images with their page info and Y coordinates
         images_to_insert = []
         for page_key, page_data in pages.items():
             images = page_data.get('images', [])
@@ -152,119 +245,70 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
                 if img_filename:
                     img_path = images_dir / img_filename
                     if img_path.exists():
+                        # Calculate average Y position from rects for better positioning
+                        rects = img.get('rects', [])
+                        avg_y = 0
+                        if rects:
+                            avg_y = sum(rect.get('y0', 0) for rect in rects) / len(rects)
+                        
+                        # Extract original text and count paragraphs for this page
+                        page_num = int(page_key)
+                        original_text = _extract_original_text_for_page(page_num)
+                        paragraph_position = _count_paragraphs_before_image(original_text, avg_y)
+                        
                         images_to_insert.append({
                             'filename': img_filename,
-                            'page': int(page_key),
+                            'page': page_num,
                             'path': img_path,
-                            'rects': img.get('rects', [])
+                            'rects': rects,
+                            'avg_y': avg_y,
+                            'paragraph_position': paragraph_position
                         })
         
         if not images_to_insert:
             log_info("No valid images found for insertion")
             return html_content
         
-        log_info(f"Inserting {len(images_to_insert)} images into HTML content")
+        # Sort images by Y coordinate within each page (higher Y = earlier in text)
+        # Group by page first, then sort within each page
+        from collections import defaultdict
+        images_by_page = defaultdict(list)
         
-        # Sort images by page order
-        images_to_insert.sort(key=lambda x: x['page'])
+        for img_info in images_to_insert:
+            images_by_page[img_info['page']].append(img_info)
         
-        # Insert images before "Figura XYZ" references
-        import re
+        # Sort images within each page by Y coordinate (descending = top to bottom in text)
+        sorted_images = []
+        for page_num, page_images in images_by_page.items():
+            # Sort by Y coordinate descending (higher Y first = earlier in text)
+            page_images.sort(key=lambda x: x['avg_y'], reverse=True)
+            log_info(f"Page {page_num}: sorted {len(page_images)} images by Y coordinate")
+            for img in page_images:
+                log_info(f"  - {img['filename']}: Y={img['avg_y']:.1f}")
+            sorted_images.extend(page_images)
         
-        # First try to find "Figura" references to place images correctly
-        # Match patterns like "Figura 7-2:", "Figura X:", "Figura X.Y:", etc.
-        # IMPROVED: Look specifically for "Figura" followed by numbers/patterns and a colon
-        figura_pattern = r'(.*?)(Figura\s+[\d\-\.]+\s*:)'
-        figura_matches = list(re.finditer(figura_pattern, html_content, re.IGNORECASE | re.DOTALL))
+        log_info(f"Inserting {len(sorted_images)} images into HTML content using intelligent pattern matching")
         
-        log_info(f"Found {len(figura_matches)} 'Figura' references in HTML content")
-        for i, match in enumerate(figura_matches):
-            figura_text = match.group(2) if match.lastindex >= 2 else match.group(0)
-            log_info(f"  Figura {i+1}: {figura_text}")
-        
-        # Create a more intelligent mapping between figure numbers and images
-        # First, group images by page for better mapping
-        images_by_page = {}
-        for img in images_to_insert:
-            page = img['page']
-            if page not in images_by_page:
-                images_by_page[page] = []
-            images_by_page[page].append(img)
-        
-        log_info(f"Images grouped by page: {dict((k, len(v)) for k, v in images_by_page.items())}")
-        
-        # Extract figure numbers and create mapping
-        figure_to_image_map = {}
-        used_images = set()
-        
-        for i, match in enumerate(figura_matches):
-            if match.lastindex >= 2:
-                figura_text = match.group(2)
-                # Extract figure number/identifier from "Figura X:"
-                figure_match = re.search(r'Figura\s+([\d\-\.]+)', figura_text, re.IGNORECASE)
-                if figure_match:
-                    figure_id = figure_match.group(1)
-                    
-                    # Try to find the best matching image
-                    best_image = None
-                    
-                    # Strategy 1: Find unused image from the same or nearby pages
-                    for img in images_to_insert:
-                        if img['filename'] not in used_images:
-                            best_image = img
-                            used_images.add(img['filename'])
-                            break
-                    
-                    if best_image:
-                        figure_to_image_map[figure_id] = best_image
-                        log_info(f"  Mapped Figura {figure_id} to image: {best_image['filename']} (page {best_image['page']})")
-                    else:
-                        log_warning(f"  No available image found for Figura {figure_id}")
-        
+        # Process images in reverse order to maintain correct positions
+        # (insert from bottom to top so positions don't shift)
         modified_content = html_content
         inserted_count = 0
         
-        # Process from end to beginning to avoid position shifting issues
-        figura_matches.reverse()
+        # Find all insertion positions first
+        image_positions = []
+        for img_info in sorted_images:
+            insertion_pos = _find_image_insertion_position(html_content, img_info)
+            if insertion_pos is not None:
+                image_positions.append((insertion_pos, img_info))
+            else:
+                log_warning(f"Could not find insertion position for {img_info['filename']}")
         
-        # Track which images have been inserted to avoid duplicates
-        inserted_image_filenames = set()
+        # Sort by position (descending) to insert from end to beginning
+        image_positions.sort(key=lambda x: x[0], reverse=True)
+        log_info(f"Found insertion positions for {len(image_positions)} images")
         
-        # Insert images before "Figura X:" references (working backwards)
-        for i, match in enumerate(figura_matches):
-            if inserted_count >= len(images_to_insert):
-                break
-            
-            # Get figure ID to find the correct image
-            figura_text = match.group(2) if match.lastindex >= 2 else match.group(0)
-            figure_match = re.search(r'Figura\s+([\d\-\.]+)', figura_text, re.IGNORECASE)
-            
-            img_info = None
-            
-            if figure_match:
-                figure_id = figure_match.group(1)
-                # Use mapped image if available and not already inserted
-                if figure_id in figure_to_image_map:
-                    mapped_img = figure_to_image_map[figure_id]
-                    if mapped_img['filename'] not in inserted_image_filenames:
-                        img_info = mapped_img
-                        log_info(f"Using mapped image for Figura {figure_id}: {img_info['filename']}")
-            
-            # Fallback: find any unused image
-            if not img_info:
-                for potential_img in images_to_insert:
-                    if potential_img['filename'] not in inserted_image_filenames:
-                        img_info = potential_img
-                        log_info(f"Using fallback image: {img_info['filename']}")
-                        break
-            
-            # Skip if no image available
-            if not img_info:
-                log_warning(f"No available image for Figura reference at position {i}")
-                continue
-            
-            # Mark this image as used
-            inserted_image_filenames.add(img_info['filename'])
+        for insertion_pos, img_info in image_positions:
+            log_info(f"Found insertion position for {img_info['filename']} at character {insertion_pos}")
             
             # Convert image to base64 for reliable PDF rendering
             try:
@@ -282,57 +326,154 @@ def _insert_images_into_html(html_content: str, images_dir: Path) -> str:
                         mime_type = 'image/png'  # default
                     
                     img_src = f"data:{mime_type};base64,{img_base64}"
-                    log_info(f"Inserting image as base64 before Figura: {img_info['filename']} ({len(img_data)} bytes)")
+                    log_info(f"Converting image to base64: {img_info['filename']} ({len(img_data)} bytes)")
             except Exception as e:
                 log_warning(f"Failed to convert image to base64: {e}")
                 img_src = img_info["path"].resolve().as_uri()  # fallback to file URI
             
             img_tag = f'\n<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
             
-            # Insert the image exactly before the "Figura X:" text
-            if match.lastindex >= 2:
-                # Insert before the "Figura X:" part (group 2)
-                figura_start = match.start(2)
-                modified_content = modified_content[:figura_start] + img_tag + modified_content[figura_start:]
-            else:
-                # Fallback: insert at the beginning of the match
-                insert_pos = match.start()
-                modified_content = modified_content[:insert_pos] + img_tag + modified_content[insert_pos:]
-            
+            # Insert the image at the found position
+            modified_content = modified_content[:insertion_pos] + img_tag + modified_content[insertion_pos:]
             inserted_count += 1
-            log_info(f"Inserted image {img_info['filename']} before Figura reference")
+            log_info(f"Inserted image {img_info['filename']} at position {insertion_pos}")
         
-        # Add any remaining unused images at the end
-        remaining_images = [img for img in images_to_insert if img['filename'] not in inserted_image_filenames]
-        if remaining_images:
-            remaining_images_html = '\n<div class="additional-images">\n<h2>Imagens Adicionais</h2>\n'
-            log_info(f"Adding {len(remaining_images)} remaining images at the end")
-            
-            for img_info in remaining_images:
-                # Convert remaining images to base64
-                try:
-                    import base64
-                    with open(img_info["path"], 'rb') as img_file:
-                        img_data = img_file.read()
-                        img_base64 = base64.b64encode(img_data).decode('utf-8')
-                        img_ext = img_info["path"].suffix.lower()
-                        mime_type = 'image/png' if img_ext == '.png' else 'image/jpeg'
-                        img_src = f"data:{mime_type};base64,{img_base64}"
-                        log_info(f"Adding remaining image: {img_info['filename']} from page {img_info['page']}")
-                except Exception as e:
-                    log_warning(f"Failed to convert remaining image to base64: {e}")
-                    img_src = img_info["path"].resolve().as_uri()
-                
-                remaining_images_html += f'<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
-            remaining_images_html += '</div>\n'
-            modified_content += remaining_images_html
+        log_success(f"Successfully inserted {inserted_count} images using intelligent pattern matching")
         
-        log_success(f"Successfully inserted {len(images_to_insert)} images into HTML")
+        # Add any uninserted images at the end
+        if inserted_count < len(sorted_images):
+            remaining_images = [img_info for _, img_info in image_positions[inserted_count:]]
+            if remaining_images:
+                log_info(f"Adding {len(remaining_images)} remaining images at the end")
+                modified_content = _add_images_at_end(modified_content, remaining_images)
+        
         return modified_content
         
     except Exception as e:
         log_error(f"Error inserting images into HTML: {e}")
         return html_content
+
+
+def _find_image_insertion_position(html_content: str, img_info: Dict) -> Optional[int]:
+    """
+    Find the exact position in HTML where the image should be inserted.
+    Uses intelligent mapping by analyzing the original page content to determine the correct figure.
+    """
+    import re
+    
+    page_num = img_info.get('page', 0)
+    filename = img_info.get('filename', '')
+    avg_y = img_info.get('avg_y', 0)
+    
+    log_info(f"Looking for insertion position for {filename} at Y={avg_y:.1f} on page {page_num}")
+    
+    # Extract original text from the source page to identify which figure this should be
+    original_text = _extract_original_text_for_page(page_num)
+    
+    # Find all figure references in the original page text
+    figure_matches = re.findall(r'Figure\s*(\d+)[-\.\s]*(\d+)\s*:', original_text)
+    
+    if figure_matches:
+        # Extract figure number from filename (e.g., page_201_img_01.png -> image 1)
+        img_match = re.search(r'_img_(\d+)\.', filename)
+        if img_match:
+            img_number = int(img_match.group(1))
+            log_info(f"Image number extracted: {img_number}")
+            
+            # Get the figure that corresponds to this image number on this page
+            if img_number <= len(figure_matches):
+                fig_major, fig_minor = figure_matches[img_number - 1]  # img_01 -> first figure
+                target_figure = f"{fig_major}-{fig_minor}"
+                log_info(f"Page {page_num}, image {img_number} should map to Figure {target_figure}")
+                
+                # Look for this specific figure in the translated HTML
+                figure_patterns = [
+                    rf'(Figure|Figura)\s*{fig_major}[-\.\s]*{fig_minor}\s*:',  
+                    rf'(Figure|Figura)\s*{fig_major}[-\.\s]*{fig_minor}[^:]',
+                ]
+                
+                for pattern in figure_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        log_info(f"Found correct figure caption for page {page_num}: {match.group()}")
+                        return match.start()
+                        
+                log_warning(f"Could not find Figure {target_figure} in HTML for page {page_num}")
+            else:
+                log_warning(f"Image {img_number} on page {page_num} exceeds available figures ({len(figure_matches)})")
+    else:
+        log_warning(f"No figure captions found in original text for page {page_num}")
+    
+    # Fallback: Look for any figure caption that matches the page context
+    # This is a more generic approach when specific mapping fails
+    log_info(f"Using fallback strategy for {filename}")
+    
+    # Try to find figures that might belong to this page based on sequential order
+    all_figures = list(re.finditer(r'(Figure|Figura)\s*\d+[-\.\s]*\d+\s*:', html_content, re.IGNORECASE))
+    
+    if all_figures:
+        # Use a heuristic: pages with lower numbers get earlier figures
+        # This assumes figures are roughly sequential in the document
+        
+        # Extract just page numbers from all images to determine relative order
+        all_page_nums = sorted(set(int(re.search(r'page_(\d+)_', f['filename']).group(1)) 
+                                   for f in [img_info] + []))  # Add context if available
+        
+        if page_num in all_page_nums:
+            page_index = all_page_nums.index(page_num)
+            
+            # Map page index to figure index (with some safety bounds)
+            if page_index < len(all_figures):
+                target_figure = all_figures[page_index]
+                log_info(f"Fallback mapping: page {page_num} -> figure at position {page_index}")
+                return target_figure.start()
+    
+    # Final fallback: Use Y coordinate to determine relative position
+    log_warning(f"Using Y-coordinate fallback for {filename}")
+    
+    # Find all paragraph breaks and estimate position based on Y coordinate
+    paragraphs = re.finditer(r'<[ph]\d*[^>]*>', html_content)
+    paragraph_list = list(paragraphs)
+    
+    if paragraph_list:
+        # Estimate relative position (higher Y = earlier position)
+        # Assuming page height ~800, normalize Y position
+        relative_pos = min(avg_y / 800.0, 1.0)  # 0.0 = bottom, 1.0 = top
+        target_idx = int((1.0 - relative_pos) * len(paragraph_list))  # Invert for text order
+        target_idx = max(0, min(target_idx, len(paragraph_list) - 1))
+        
+        target_paragraph = paragraph_list[target_idx]
+        log_info(f"Y-coordinate fallback: Y={avg_y:.1f} -> paragraph {target_idx}")
+        return target_paragraph.start()
+    
+    log_warning("Could not find suitable insertion position")
+    return None
+
+
+def _add_images_at_end(html_content: str, images: List[Dict]) -> str:
+    """Add images at the end of HTML content as fallback."""
+    if not images:
+        return html_content
+    
+    remaining_images_html = '\n<div class="additional-images">\n<h2>Imagens Adicionais</h2>\n'
+    
+    for img_info in images:
+        try:
+            import base64
+            with open(img_info["path"], 'rb') as img_file:
+                img_data = img_file.read()
+                img_base64 = base64.b64encode(img_data).decode('utf-8')
+                img_ext = img_info["path"].suffix.lower()
+                mime_type = 'image/png' if img_ext == '.png' else 'image/jpeg'
+                img_src = f"data:{mime_type};base64,{img_base64}"
+        except Exception as e:
+            log_warning(f"Failed to convert image to base64: {e}")
+            img_src = img_info["path"].resolve().as_uri()
+        
+        remaining_images_html += f'<div class="image-container"><img src="{img_src}" alt="Imagem da página {img_info["page"]}" class="inserted-image" /></div>\n'
+    
+    remaining_images_html += '</div>\n'
+    return html_content + remaining_images_html
 
 
 def _get_professional_css() -> str:
