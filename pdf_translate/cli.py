@@ -19,6 +19,7 @@ from .logger import cleanup_logger, setup_logger
 from .status import StatusManager
 from .translate import TranslationClient
 from .utils import ensure_output_dir, parse_page_range, validate_pdf_path
+from .pricing import get_model_pricing, calculate_cost, format_cost_estimate
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser."""
@@ -65,6 +66,12 @@ def main_process(args):
         translator = TranslationClient(model=model_name, api_key=api_key)
         translated_pages = {pn: [""] * len(chunks) for pn, chunks in chunks_by_page.items()}
 
+        # Track token usage and costs
+        total_input_tokens = 0
+        total_output_tokens = 0 
+        total_cached_tokens = 0
+        total_requests = 0
+
         status.update("Translating chunks concurrently...")
         with Progress(SpinnerColumn(), TextColumn("[green]Translating..."), BarColumn(), TextColumn("{task.completed}/{task.total}")) as progress:
             task = progress.add_task("Chunks", total=len(all_chunks_with_ref))
@@ -73,8 +80,15 @@ def main_process(args):
                 for future in as_completed(future_to_chunk_ref):
                     pn, i = future_to_chunk_ref[future]
                     try:
-                        translated_text, _ = future.result()
+                        translated_text, token_usage = future.result()
                         translated_pages[pn][i] = translated_text
+                        
+                        # Accumulate token usage
+                        total_input_tokens += token_usage.get("input", 0)
+                        total_output_tokens += token_usage.get("output", 0)
+                        total_cached_tokens += token_usage.get("cached", 0)
+                        total_requests += 1
+                        
                     except Exception as e:
                         status.log_error(f"Page {pn}, Chunk {i+1} failed: {e}")
                         original_chunk = chunks_by_page[pn][i]
@@ -106,7 +120,26 @@ def main_process(args):
         
         from .assemble import generate_pdf_from_html
         pdf_output_path = generate_pdf_from_html(final_html_content, pdf_output_path, images_dir)
+        
+        # Calculate and display cost information
+        pricing = get_model_pricing(model_name)
+        total_cost = calculate_cost(total_input_tokens, total_output_tokens, total_cached_tokens, pricing)
+        
+        # Display cost summary
         status.log_success(f"SUCCESS! PDF gerado: {pdf_output_path}")
+        status.log_info("")
+        status.log_info("💰 CUSTO DA TRADUÇÃO:")
+        status.log_info(f"   Modelo: {model_name}")
+        status.log_info(f"   Total de requisições: {total_requests:,}")
+        status.log_info(f"   Tokens (Input): {total_input_tokens:,}")
+        status.log_info(f"   Tokens (Output): {total_output_tokens:,}")
+        if total_cached_tokens > 0:
+            cached_pct = (total_cached_tokens / total_input_tokens) * 100 if total_input_tokens > 0 else 0
+            status.log_info(f"   Tokens (Cached): {total_cached_tokens:,} ({cached_pct:.1f}% desconto)")
+        status.log_info(f"   💵 CUSTO TOTAL: ${total_cost:.4f} USD")
+        
+        if pricing and pricing.supports_caching and total_cached_tokens > 0:
+            status.log_info("   ✨ Prompt caching ativo - economia significativa!")
 
         return 0
 

@@ -1,0 +1,119 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-x86:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.9 (32-bit)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        architecture: 'x86'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -e .
+        playwright install chromium
+    
+    - name: Build Windows x86 binary
+      run: |
+        pyinstaller ocrack.spec --name ocrack-windows-x86 --distpath dist-x86
+    
+    - name: Upload Windows x86 binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: ocrack-windows-x86
+        path: dist-x86/ocrack-windows-x86.exe
+
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.9 (64-bit)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        architecture: 'x64'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -e .
+        playwright install chromium
+    
+    - name: Build Windows x64 binary
+      run: |
+        pyinstaller ocrack.spec --name ocrack-windows-x64 --distpath dist-x64
+    
+    - name: Upload Windows x64 binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: ocrack-windows-x64
+        path: dist-x64/ocrack-windows-x64.exe
+
+  build-linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 libxrender1 libxrandr2 libxss1 libgtk-3-0 libasound2
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -e .
+        playwright install chromium
+    
+    - name: Build Linux x64 binary
+      run: |
+        pyinstaller ocrack.spec --name ocrack-linux-x64 --distpath dist-linux
+    
+    - name: Upload Linux x64 binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: ocrack-linux-x64
+        path: dist-linux/ocrack-linux-x64
+
+  create-release:
+    needs: [build-windows-x86, build-windows-x64, build-linux-x64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ocrack-windows-x86/ocrack-windows-x86.exe
+          ocrack-windows-x64/ocrack-windows-x64.exe
+          ocrack-linux-x64/ocrack-linux-x64
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
